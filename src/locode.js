@@ -190,10 +190,30 @@ function buildMessages(convo) {
   return msgs;
 }
 
+// 에이전트 루프가 길어지면 messages 가 모델 컨텍스트를 넘겨 앞부분(도구 규칙이
+// 담긴 시스템 프롬프트)이 잘리고, 그러면 모델이 도구를 안 부르고 잡담하기 시작한다.
+// 시스템 프롬프트 + 이번 턴의 요청(keep) + 최근 HISTORY_TAIL 개만 보낸다.
+const HISTORY_TAIL = 14;
+export function windowMessages(messages, keep) {
+  if (messages.length <= HISTORY_TAIL + 2) return messages;
+  let tail = messages.slice(-HISTORY_TAIL);
+  // 잘린 지점이 tool 응답으로 시작하면 짝(assistant tool_calls)이 없어 API 가 거부한다.
+  while (tail.length && tail[0].role === "tool") tail = tail.slice(1);
+  const head = [messages[0]];
+  if (keep && !tail.includes(keep)) head.push(keep);
+  return [...head, ...tail];
+}
+
+// 모델이 보고한 컨텍스트 길이에 맞춰 num_ctx 를 정한다(상한 16384). 알 수 없으면 8192.
+function ctxSize(model) {
+  const limit = ctx.modelCtxLen?.(model) || 0;
+  return limit ? Math.min(limit, 16384) : 8192;
+}
+
 async function callModel(model, messages, useTools, signal) {
   const body = {
     model, messages, stream: false,
-    options: { temperature: 0.2, num_ctx: 8192 },
+    options: { temperature: 0.2, num_ctx: ctxSize(model) },
   };
   if (useTools) body.tools = LOCODE_TOOLS;
   else body.format = ACTION_SCHEMA;
@@ -552,6 +572,7 @@ export async function locodeSend(convo, text) {
   await ctx.ensureModelInfo?.(model);
   const useTools = isToolCapable(model);
   const messages = buildMessages(convo);
+  const taskMsg = messages[messages.length - 1]; // 이번 턴의 사용자 요청 — 창을 줄여도 항상 유지
   let iter = 0;
   let nudges = 0;
   let stuck = 0; // 연속 실패/거부 횟수 — 무한 루프 방지용
@@ -569,7 +590,7 @@ export async function locodeSend(convo, text) {
     while (iter++ < MAX && !stopFlag) {
       let res;
       try {
-        res = await callModel(model, messages, useTools);
+        res = await callModel(model, windowMessages(messages, taskMsg), useTools);
       } catch (e) {
         pushAssistant(convo, "⚠️ 모델 호출 실패: " + (e.message || e));
         break;

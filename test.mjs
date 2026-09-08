@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { parseNDJSON, pullPercent, shouldCompress, humanBytes, humanTime, pullRate, ollamaError, renderMarkdown, renderTeX, highlightCode, checkAttachments, ATT_LIMITS, modelRefKey, isInstalledModel } from "./src/lib.js";
-import { locodeTier, salvageToolCalls, normalizePlan, commandPurpose, parseLocodeAction, normalizeEdits } from "./src/locode.js";
+import { locodeTier, salvageToolCalls, normalizePlan, commandPurpose, parseLocodeAction, normalizeEdits, windowMessages } from "./src/locode.js";
 import { lineDiff, diffStat } from "./src/lib.js";
 
 // parseNDJSON: 잘린 마지막 줄 보존
@@ -237,6 +237,31 @@ assert.equal(parseLocodeAction('먼저 확인합니다. {"action":"list_dir","pa
   assert.deepEqual(normalizeEdits([{ new: "orphan" }, { old: "z" }]), [{ old: "z", new: "" }]);
   assert.deepEqual(normalizeEdits("nope"), []);
   assert.deepEqual(normalizeEdits(null), []);
+}
+
+// windowMessages — 긴 에이전트 루프에서 컨텍스트 넘침 방지 (시스템 + 이번 요청 + 최근 tail)
+{
+  const sys = { role: "system", content: "S" };
+  const task = { role: "user", content: "TASK" };
+  // 짧으면 그대로
+  assert.deepEqual(windowMessages([sys, task], task), [sys, task]);
+  // 길면: system + task + 최근 14개
+  const long = [sys, task, ...Array.from({ length: 30 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: "m" + i }))];
+  const w = windowMessages(long, task);
+  assert.equal(w[0], sys);
+  assert.equal(w[1], task);
+  assert.equal(w.length, 2 + 14);
+  assert.equal(w[w.length - 1], long[long.length - 1]);
+  // tail 이 tool 응답으로 시작하면 짝(assistant tool_calls)이 없어 그 앞을 버린다
+  const withTool = [sys, task,
+    ...Array.from({ length: 11 }, () => ({ role: "x" })),
+    { role: "tool", content: "t" },
+    ...Array.from({ length: 13 }, () => ({ role: "assistant", content: "a" })),
+  ];
+  assert.equal(withTool.slice(-14)[0].role, "tool"); // 전제 확인
+  const w2 = windowMessages(withTool, task);
+  assert.notEqual(w2[2].role, "tool");
+  assert.equal(w2.length, 2 + 13);
 }
 
 console.log("ok");

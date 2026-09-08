@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { parseNDJSON, pullPercent, shouldCompress, humanBytes, humanTime, pullRate, ollamaError, renderMarkdown, renderTeX, highlightCode, checkAttachments, ATT_LIMITS, modelRefKey, isInstalledModel } from "./src/lib.js";
-import { locodeTier, salvageToolCalls, normalizePlan, commandPurpose, parseLocodeAction } from "./src/locode.js";
+import { locodeTier, salvageToolCalls, normalizePlan, commandPurpose, parseLocodeAction, normalizeEdits } from "./src/locode.js";
 import { lineDiff, diffStat } from "./src/lib.js";
 
 // parseNDJSON: 잘린 마지막 줄 보존
@@ -226,5 +226,17 @@ assert.ok(renderMarkdown("- 첫 줄이 길어서\n  다음 줄로 이어짐").in
 // 구조화 출력 대체 경로는 JSON 펜스·설명 앞뒤를 허용한다.
 assert.equal(parseLocodeAction('```json\n{"action":"search","query":"TODO","message":"검색"}\n```').action, "search");
 assert.equal(parseLocodeAction('먼저 확인합니다. {"action":"list_dir","path":"","message":"목록"}').action, "list_dir");
+
+// normalizeEdits — edit_file 의 {old,new} 블록 흡수 (모델별 키 변형 포함)
+{
+  assert.deepEqual(normalizeEdits([{ old: "a", new: "b" }]), [{ old: "a", new: "b" }]);
+  // {search,replace} / {from,to} 별칭
+  assert.deepEqual(normalizeEdits([{ search: "x", replace: "y" }]), [{ old: "x", new: "y" }]);
+  assert.deepEqual(normalizeEdits([{ from: "p", to: "q" }]), [{ old: "p", new: "q" }]);
+  // old 없는 항목은 버린다, new 없으면 빈 문자열(삭제)
+  assert.deepEqual(normalizeEdits([{ new: "orphan" }, { old: "z" }]), [{ old: "z", new: "" }]);
+  assert.deepEqual(normalizeEdits("nope"), []);
+  assert.deepEqual(normalizeEdits(null), []);
+}
 
 console.log("ok");

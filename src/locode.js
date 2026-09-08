@@ -127,7 +127,8 @@ const LOCODE_TOOLS = [
   { type: "function", function: { name: "read_file", description: "프로젝트 내 텍스트 파일 읽기.", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
   { type: "function", function: { name: "search", description: "프로젝트 내 텍스트(kind=text) 또는 파일명(kind=filename) 검색.", parameters: { type: "object", properties: { query: { type: "string" }, kind: { type: "string", enum: ["text", "filename"] } }, required: ["query"] } } },
   { type: "function", function: { name: "propose_plan", description: "작업을 시작하기 전 2~8개의 짧은 한국어 단계로 계획을 제안한다. 파일을 변경하거나 명령을 실행하지 않는다.", parameters: { type: "object", properties: { steps: { type: "array", items: { type: "object", properties: { title: { type: "string" }, detail: { type: "string" } }, required: ["title"] } } }, required: ["steps"] } } },
-  { type: "function", function: { name: "write_file", description: "파일 전체 내용을 새로 씀(생성 또는 덮어쓰기). 사용자 승인 후에만 실제 반영된다. content 는 파일 전체.", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" }, summary: { type: "string", description: "이 변경이 무엇을 하는지 한 문장" } }, required: ["path", "content", "summary"] } } },
+  { type: "function", function: { name: "write_file", description: "새 파일 생성 또는 파일 전체 재작성. 기존 파일을 부분 수정할 땐 edit_file 을 쓰세요. 사용자 승인 후에만 반영된다. content 는 파일 전체.", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" }, summary: { type: "string", description: "이 변경이 무엇을 하는지 한 문장" } }, required: ["path", "content", "summary"] } } },
+  { type: "function", function: { name: "edit_file", description: "기존 파일의 일부만 교체(부분 패치, 권장). edits 는 [{old,new}] 배열 — old 는 파일에 지금 있는 정확한 텍스트(들여쓰기·공백 포함), new 는 바꿀 텍스트. old 는 파일에서 유일해야 하니 앞뒤 줄을 충분히 포함하세요. 수정 전 반드시 read_file 하세요. 사용자 승인 후에만 반영된다.", parameters: { type: "object", properties: { path: { type: "string" }, edits: { type: "array", items: { type: "object", properties: { old: { type: "string" }, new: { type: "string" } }, required: ["old", "new"] } }, summary: { type: "string", description: "이 변경이 무엇을 하는지 한 문장" } }, required: ["path", "edits", "summary"] } } },
   { type: "function", function: { name: "move_path", description: "파일/폴더 이름 변경 또는 이동. 사용자 확인 필요.", parameters: { type: "object", properties: { from: { type: "string" }, to: { type: "string" }, summary: { type: "string" } }, required: ["from", "to", "summary"] } } },
   { type: "function", function: { name: "delete_path", description: "파일 삭제(폴더는 비어있을 때만). 사용자 확인 필요.", parameters: { type: "object", properties: { path: { type: "string" }, summary: { type: "string" } }, required: ["path", "summary"] } } },
   { type: "function", function: { name: "run_command", description: "프로젝트 루트에서 터미널 명령 실행. 반드시 왜 필요한지 why를 설명한다. 사용자 승인 후에만 실행된다.", parameters: { type: "object", properties: { command: { type: "string" }, why: { type: "string" } }, required: ["command", "why"] } } },
@@ -138,13 +139,14 @@ const ACTION_SCHEMA = {
   type: "object",
   properties: {
     thought: { type: "string" },
-    action: { type: "string", enum: ["list_dir", "read_file", "search", "propose_plan", "write_file", "move_path", "delete_path", "run_command", "finish"] },
+    action: { type: "string", enum: ["list_dir", "read_file", "search", "propose_plan", "write_file", "edit_file", "move_path", "delete_path", "run_command", "finish"] },
     path: { type: "string" },
     from: { type: "string" },
     to: { type: "string" },
     query: { type: "string" },
     kind: { type: "string", enum: ["text", "filename"] },
     content: { type: "string" },
+    edits: { type: "array", items: { type: "object" } },
     summary: { type: "string" },
     command: { type: "string" },
     why: { type: "string" },
@@ -160,15 +162,16 @@ function systemPrompt(convo) {
     `프로젝트: ${convo.project?.name} (${convo.project?.path})`,
     convo.git?.is_git ? `Git 브랜치: ${convo.git.branch}, 변경 파일 ${convo.git.files?.length ?? 0}개` : "Git 저장소 아님",
     "",
-    "사용 가능한 동작: list_dir · read_file · search · propose_plan · write_file · move_path · delete_path · run_command · finish",
+    "사용 가능한 동작: list_dir · read_file · search · propose_plan · write_file · edit_file · move_path · delete_path · run_command · finish",
     "",
     "규칙:",
     "- 수정·명령 실행이 포함된 작업은 먼저 propose_plan 으로 2~8단계 계획을 제시하세요.",
     "- 어떤 파일이 있는지 모르면 먼저 search(kind=filename) 로 파일명을, search(kind=text) 로 코드 내용을 찾으세요. 짐작으로 read_file 하지 말고, list_dir·search 로 확인된 경로만 읽으세요.",
     "- 폴더가 비어 있거나 새로 만들 파일이 분명하면, 읽기를 건너뛰고 곧바로 write_file 로 파일을 생성하세요. 없는 파일을 반복해서 읽으려 하지 마세요.",
     "- 새 프로그램·문서를 만드는 요청이면 필요한 파일을 write_file 로 하나씩 생성하는 데 집중하세요. 기존 파일·폴더를 지우거나 정리하려 들지 마세요.",
-    "- write_file 은 파일 **전체 내용**을 넘겨야 합니다(부분 패치 불가). 수정 전 반드시 그 파일을 read_file 하세요.",
-    "- 모든 write_file · move_path · delete_path 는 사용자 승인을 거쳐야 실제 반영됩니다. 승인 결과(applied/rejected)를 받은 뒤 다음 동작을 정하세요.",
+    "- 기존 파일을 고칠 땐 edit_file 을 쓰세요: edits:[{old,new}] 로 바뀌는 부분만 넘깁니다. old 는 파일에 지금 있는 정확한 텍스트를 앞뒤 줄까지 충분히 포함해 파일에서 유일하게 만드세요. 수정 전 반드시 read_file 로 현재 내용을 확인하세요.",
+    "- write_file 은 새 파일을 만들거나 파일 전체를 다시 쓸 때만 씁니다(content 에 파일 전체).",
+    "- 모든 write_file · edit_file · move_path · delete_path 는 사용자 승인을 거쳐야 실제 반영됩니다. 승인 결과(applied/rejected)를 받은 뒤 다음 동작을 정하세요.",
     "- run_command 는 사용자 승인 후 프로젝트 루트에서만 실행됩니다. 테스트·빌드처럼 필요한 경우에만 사용하고, command와 why를 정확히 작성하세요. 패키지 설치·네트워크·Git 변경 명령은 추가 확인이 필요할 수 있습니다.",
     "- 요청받지 않은 커밋·푸시·브랜치 변경은 하지 마세요.",
     "- 경로는 항상 프로젝트 루트 기준 상대 경로입니다.",
@@ -200,7 +203,18 @@ async function callModel(model, messages, useTools, signal) {
   return { content: j.message?.content || "", toolCalls: j.message?.tool_calls || [] };
 }
 
-const WRITE_ACTIONS = new Set(["write_file", "move_path", "delete_path"]);
+const WRITE_ACTIONS = new Set(["write_file", "edit_file", "move_path", "delete_path"]);
+
+// 모델이 edits 항목을 {old,new} 대신 {search,replace}/{from,to} 등으로 줄 수도 있어 흡수한다.
+export function normalizeEdits(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((e) => ({
+      old: String((e && (e.old ?? e.search ?? e.from ?? e.original)) ?? ""),
+      new: String((e && (e.new ?? e.replace ?? e.replacement ?? e.to ?? e.updated)) ?? ""),
+    }))
+    .filter((e) => e.old);
+}
 
 // 모델 출력은 불완전할 수 있으므로 표시·저장 전 계획을 작고 안전한 형태로 정규화한다.
 export function normalizePlan(steps) {
@@ -260,6 +274,8 @@ async function execAction(convo, name, args) {
     return badParam(convo, step, "search 에는 query(검색어)가 필요합니다");
   if (name === "write_file" && (!a.path || typeof a.content !== "string"))
     return badParam(convo, step, "write_file 에는 path 와 content(파일 전체 내용)가 필요합니다");
+  if (name === "edit_file" && (!a.path || !normalizeEdits(a.edits).length))
+    return badParam(convo, step, "edit_file 에는 path 와 edits([{old,new}], old 는 파일에 있는 정확한 텍스트)가 필요합니다");
   if (name === "move_path" && (!a.from || !a.to))
     return badParam(convo, step, "move_path 에는 from 과 to 가 필요합니다");
   if (name === "run_command" && (!a.command || typeof a.command !== "string"))
@@ -339,7 +355,8 @@ async function execAction(convo, name, args) {
   // ── 쓰기 계열 (Tier 1~2, 승인 필요) ──
   let before = null;
   let diff = null;
-  if (name === "write_file") {
+  let edits = null;
+  if (name === "write_file" || name === "edit_file") {
     try {
       const f = await invoke("locode_read_file", { rel: a.path });
       before = f.content;
@@ -347,9 +364,20 @@ async function execAction(convo, name, args) {
     } catch {
       before = null; // 새 파일
     }
-    diff = lineDiff(before, a.content);
   }
-  const tier = name === "write_file" ? 1 : 2;
+  if (name === "write_file") {
+    diff = lineDiff(before, a.content);
+  } else if (name === "edit_file") {
+    edits = normalizeEdits(a.edits);
+    // 승인 카드용 미리보기: 각 블록의 old→삭제, new→추가. (실제 적용은 Rust 가
+    // 마스킹되지 않은 원본에 대해 수행하므로 여기서는 블록만 보여준다.)
+    diff = [];
+    for (const e of edits) {
+      for (const l of e.old.split("\n")) diff.push({ type: "del", text: l });
+      for (const l of e.new.split("\n")) diff.push({ type: "add", text: l });
+    }
+  }
+  const tier = name === "write_file" || name === "edit_file" ? 1 : 2;
   const decision = autoApprove(convo, name, null) || await requestApproval(convo, {
     kind: name, tier, path: a.path, from: a.from, to: a.to,
     content: a.content, summary: a.summary || "", before, diff,
@@ -369,6 +397,14 @@ async function execAction(convo, name, args) {
       mtimeCache.set(a.path, r.mtime);
       recordChange(convo, { path: a.path, type: r.created ? "create" : "modify", before: r.before ?? null, after: content });
       step.label = `✅ ${a.path} ${r.created ? "생성" : "수정"}`;
+    } else if (name === "edit_file") {
+      const r = await invoke("locode_edit_file", { rel: a.path, edits, expectedMtime: mtimeCache.get(a.path) ?? null });
+      mtimeCache.set(a.path, r.mtime);
+      // 원장 diff 용 after 는 원본(r.before)에 같은 순서로 치환해 재현한다(Rust 와 동일: 첫 일치만).
+      let after = r.before ?? "";
+      for (const e of edits) after = after.replace(e.old, e.new);
+      recordChange(convo, { path: a.path, type: "modify", before: r.before ?? null, after });
+      step.label = `✅ ${a.path} 수정 (${edits.length}곳)`;
     } else if (name === "move_path") {
       await invoke("locode_move", { from: a.from, to: a.to });
       recordChange(convo, { path: `${a.from} → ${a.to}`, type: "rename", from: a.from, to: a.to });
@@ -857,7 +893,7 @@ function renderStepRow(s, convo) {
     (s.path ? `<div>경로: <code>${escapeHtml(s.path)}</code></div>` : "") +
     (time ? `<div>시간: ${time}</div>` : "") +
     `<div>결과: ${s.ok ? "성공" : "실패"}</div>`;
-  if (s.path && s.ok && /read_file|write_file/.test(s.kind || "")) {
+  if (s.path && s.ok && /read_file|write_file|edit_file/.test(s.kind || "")) {
     const open = document.createElement("button");
     open.type = "button";
     open.className = "lc-step-open";
@@ -1052,7 +1088,7 @@ function renderApprovalCard(action) {
   const card = document.createElement("div");
   card.className = "lc-approve tier-" + action.tier;
   const isDanger = action.tier >= 2;
-  const kindLabel = { write_file: "파일 쓰기", move_path: "이동/이름변경", delete_path: "삭제", run_command: "명령 실행" }[action.kind] || action.kind;
+  const kindLabel = { write_file: "파일 쓰기", edit_file: "부분 수정", move_path: "이동/이름변경", delete_path: "삭제", run_command: "명령 실행" }[action.kind] || action.kind;
   const target = action.kind === "move_path" ? `${action.from} → ${action.to}` : action.kind === "run_command" ? action.command : action.path;
 
   const stat = action.diff ? diffStat(action.diff) : null;

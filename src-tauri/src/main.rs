@@ -101,6 +101,7 @@ fn main() {
             locode::locode_list_dir,
             locode::locode_read_file,
             locode::locode_write_file,
+            locode::locode_edit_file,
             locode::locode_move,
             locode::locode_delete,
             locode::locode_search,

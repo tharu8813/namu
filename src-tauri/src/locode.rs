@@ -454,6 +454,79 @@ pub fn locode_write_file(
     })
 }
 
+/// 검색/치환 블록 한 쌍. `old` 는 파일에 현재 있는 정확한 텍스트, `new` 는 대체할 텍스트.
+#[derive(serde::Deserialize)]
+pub struct Edit {
+    old: String,
+    #[serde(rename = "new")]
+    new_text: String,
+}
+
+/// edits 를 순서대로 적용한다. 각 `old` 는 (그 시점의) 내용에서 정확히 한 번만 나타나야 한다.
+fn apply_edits(mut content: String, edits: &[Edit]) -> Result<String, String> {
+    for (i, e) in edits.iter().enumerate() {
+        let n = i + 1;
+        if e.old.is_empty() {
+            return Err(format!("{n}번째 수정: old(찾을 텍스트)가 비어 있습니다"));
+        }
+        let preview: String = e.old.chars().take(160).collect();
+        match content.matches(e.old.as_str()).count() {
+            0 => return Err(format!("{n}번째 수정: 파일에서 다음 텍스트를 찾지 못했습니다. read_file 로 현재 내용을 다시 확인하세요:\n{preview}")),
+            1 => {}
+            c => return Err(format!("{n}번째 수정: 다음 텍스트가 {c}곳에 있습니다. 앞뒤 줄을 더 포함해 유일하게 만드세요:\n{preview}")),
+        }
+        content = content.replacen(e.old.as_str(), &e.new_text, 1);
+    }
+    Ok(content)
+}
+
+/// 기존 파일의 일부만 검색/치환으로 수정한다(부분 패치). 전체 재작성은 write_file.
+#[tauri::command]
+pub fn locode_edit_file(
+    state: tauri::State<'_, LocodeState>,
+    rel: String,
+    edits: Vec<Edit>,
+    expected_mtime: Option<u64>,
+) -> Result<WriteResult, String> {
+    let root = root_of(&state)?;
+    let file = resolve(&root, &rel, true)?;
+    if is_secret_file(&file) {
+        return Err("비밀 파일은 편집할 수 없습니다".into());
+    }
+    if edits.is_empty() {
+        return Err("수정 내용(edits)이 없습니다".into());
+    }
+    let meta = fs::metadata(&file).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("파일이 아닙니다".into());
+    }
+    if let Some(exp) = expected_mtime {
+        let cur = mtime_of(&file);
+        if cur != 0 && exp != 0 && cur != exp {
+            return Err("파일이 외부에서 변경되었습니다. 다시 읽은 뒤 진행하세요.".into());
+        }
+    }
+    let raw = fs::read(&file).map_err(|e| e.to_string())?;
+    if looks_binary(&raw) {
+        return Err("바이너리 파일은 편집할 수 없습니다".into());
+    }
+    // 실제(마스킹되지 않은) 내용에 적용해야 비밀이 마스킹 문자열로 덮이지 않는다.
+    let before = String::from_utf8_lossy(&raw).to_string();
+    let after = apply_edits(before.clone(), &edits)?;
+    if after == before {
+        return Err("수정 결과가 원본과 동일합니다".into());
+    }
+    if after.len() as u64 > MAX_READ_BYTES {
+        return Err("수정 후 크기가 512KB를 초과합니다".into());
+    }
+    fs::write(&file, after.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(WriteResult {
+        created: false,
+        before: Some(before),
+        mtime: mtime_of(&file),
+    })
+}
+
 /// 파일/폴더 이동·이름 변경. 둘 다 루트 내부여야 하고 대상이 없어야 한다.
 #[tauri::command]
 pub fn locode_move(
@@ -794,7 +867,31 @@ pub fn locode_audit(state: tauri::State<'_, LocodeState>, entry: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::command_policy;
+    use super::{apply_edits, command_policy, Edit};
+
+    fn edit(old: &str, new: &str) -> Edit {
+        Edit { old: old.into(), new_text: new.into() }
+    }
+
+    #[test]
+    fn apply_edits_replaces_unique_match() {
+        let out = apply_edits("let x = 1;\nlet y = 2;\n".into(), &[edit("x = 1", "x = 42")]).unwrap();
+        assert_eq!(out, "let x = 42;\nlet y = 2;\n");
+        // 순차 적용: 두 번째 edit 은 첫 번째 결과에 대해 매칭
+        let out2 = apply_edits(
+            "a\nb\n".into(),
+            &[edit("a", "AA"), edit("b", "BB")],
+        )
+        .unwrap();
+        assert_eq!(out2, "AA\nBB\n");
+    }
+
+    #[test]
+    fn apply_edits_rejects_missing_and_ambiguous() {
+        assert!(apply_edits("dup\ndup\n".into(), &[edit("dup", "x")]).is_err()); // 2곳
+        assert!(apply_edits("hello\n".into(), &[edit("zzz", "x")]).is_err()); // 0곳
+        assert!(apply_edits("hello\n".into(), &[edit("", "x")]).is_err()); // 빈 old
+    }
 
     #[test]
     fn dangerous_commands_are_blocked() {

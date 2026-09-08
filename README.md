@@ -28,7 +28,7 @@ test.mjs         lib.js / locode.js 단위 테스트
 - **CHAT** — 일반 대화 (기본). 기존 동작·저장된 대화 그대로.
 - **LOCODE** — 로컬 프로젝트를 읽고·수정하고·검증 (Tauri 데스크톱 앱 전용). 헤더의 `CHAT | LOCODE` 로 전환.
   - Phase 1: 폴더 선택 → AI가 `list_dir`/`read_file`/`search` 로 프로젝트 분석 (파일 보기는 AI 작업 단계에서 열람)
-  - Phase 2: **승인제 파일 쓰기** — AI가 `write_file`/`move_path`/`delete_path` 를 제안하면
+  - Phase 2: **승인제 파일 쓰기** — AI가 `write_file`(새 파일·전체 재작성)/`edit_file`(부분 패치: `edits:[{old,new}]` 검색·치환 블록, Rust가 마스킹되지 않은 원본에 적용)/`move_path`/`delete_path` 를 제안하면
     diff 미리보기 + 승인 카드(삭제·이동은 Tier 2 빨간 경고). 승인해야만 반영.
     변경 파일 원장(A/M/D/R + diff + **되돌리기**), 외부 변경 감지(mtime), 512KB 쓰기 한도.
   - Phase 3(현재): **승인제 명령 실행** — `run_command`는 프로젝트 루트에서만 실행되고, 실시간 출력·중지·기본 120초(백엔드 상한 600초)·256KB 출력 제한이 적용된다. 패키지 설치·네트워크·Git 변경은 `실행` 입력 재확인이 필요하며, 재귀 삭제·권한/레지스트리/시스템 변경·강제 Git 작업은 Rust에서 차단된다.

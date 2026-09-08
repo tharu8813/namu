@@ -370,6 +370,22 @@ function convoMatches(c, q) {
   return c.messages.some((m) => m.role !== "system" && (m.content || "").toLowerCase().includes(q));
 }
 
+// 사이드바에 보이는 순서 그대로의 대화 목록 (검색·고정·최신순). 키보드 이동도 이걸 쓴다.
+function visibleConvos() {
+  const q = convoQuery.trim().toLowerCase();
+  return convos
+    .filter((c) => convoMatches(c, q))
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updated || 0) - (a.updated || 0));
+}
+
+function switchConvoBy(dir) {
+  const list = visibleConvos();
+  if (!list.length) return;
+  const i = list.findIndex((c) => c.id === activeId);
+  const next = list[((i < 0 ? 0 : i + dir) + list.length) % list.length];
+  if (next && next.id !== activeId) { activeId = next.id; saveAll(); renderAll(); closeSidebar(); }
+}
+
 function renderConvoList() {
   const el = $("convoList");
   el.innerHTML = "";
@@ -377,10 +393,7 @@ function renderConvoList() {
     el.innerHTML = `<p class="convo-empty">채팅이 없습니다.<br>＋ 버튼으로 새 채팅을 시작하세요.</p>`;
     return;
   }
-  const q = convoQuery.trim().toLowerCase();
-  const list = convos.filter((c) => convoMatches(c, q))
-    .slice()
-    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updated || 0) - (a.updated || 0));
+  const list = visibleConvos();
   if (!list.length) {
     el.innerHTML = `<p class="convo-empty">"${escapeHtml(convoQuery)}" 와 일치하는 대화가 없습니다.</p>`;
     return;
@@ -1483,8 +1496,32 @@ $("setTemp").addEventListener("input", () => { settings.temperature = parseFloat
 $("setCompress").addEventListener("click", () => { settings.compress.enabled = !settings.compress.enabled; saveAll(); renderSettings(); });
 $("setThreshold").addEventListener("input", () => { settings.compress.threshold = parseInt($("setThreshold").value); $("setThresholdVal").textContent = settings.compress.threshold; saveAll(); });
 $("resetSettings").onclick = () => { settings = JSON.parse(JSON.stringify(DEFAULTS)); saveAll(); applyTheme(); renderSettings(); refreshModels(); toast("기본값으로 되돌림"); };
+$("openShortcuts").onclick = () => { closeSheet(); openSheet("shortcutsSheet"); };
 
-window.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeSheet(); closeSidebar(); closeFilePreview(); } });
+// ---------- 키보드 단축키 ----------
+const isTypingTarget = (t) => t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if ($("shortcutsSheet").classList.contains("open")) { closeSheet(); return; }
+    closeSheet(); closeSidebar(); closeFilePreview(); closeConvoMenu();
+    if (isTypingTarget(e.target)) e.target.blur();
+    return;
+  }
+  const mod = e.ctrlKey || e.metaKey;
+  const typing = isTypingTarget(e.target);
+
+  if (mod && e.key.toLowerCase() === "n") { e.preventDefault(); newConvo(); return; }
+  if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); $("input").focus(); return; }
+  if (mod && e.key.toLowerCase() === "f") { e.preventDefault(); openSidebar(); $("convoSearch").focus(); return; }
+  if (mod && e.key === ",") { e.preventDefault(); openSheet("settingsSheet"); return; }
+  if (e.altKey && e.key === "ArrowUp") { e.preventDefault(); switchConvoBy(-1); return; }
+  if (e.altKey && e.key === "ArrowDown") { e.preventDefault(); switchConvoBy(1); return; }
+  if (!typing && !mod && (e.key === "?" || (e.shiftKey && e.key === "/"))) {
+    e.preventDefault();
+    $("shortcutsSheet").classList.contains("open") ? closeSheet() : openSheet("shortcutsSheet");
+  }
+});
 
 $("modeSeg").addEventListener("click", (e) => {
   const b = e.target.closest("button");

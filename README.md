@@ -130,7 +130,6 @@ build.bat
 테스트 → `tauri build --no-bundle` → `installer/payload/` 스테이징(앱 + 동봉 Ollama
 CPU 런타임) → Inno Setup 컴파일 순으로 실행되어
 `installer/output/Namu-Setup-<버전>.exe` 가 생성됩니다.
-배포 전 `setup.iss` 상단의 `MyAppPublisher` · `MyAppURL` 을 채우세요.
 
 ```
 src/

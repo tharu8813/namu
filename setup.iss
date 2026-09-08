@@ -5,9 +5,8 @@
 #define MyAppName "Namu"
 #define MyAppNameKo "나무"
 #define MyAppVersion "0.1.0"
-; TODO: 배포자·저장소 주소를 실제 값으로 채우세요.
-#define MyAppPublisher "Namu"
-#define MyAppURL "https://example.com/namu"
+#define MyAppPublisher "tharu8813"
+#define MyAppURL "https://github.com/tharu8813/namu"
 #define MyAppExeName "Namu.exe"
 #define MyAppGUID "{{0E1F359D-09D0-4F3C-BE2E-032F1D4E56D1}"
 ; scripts\build-installer.ps1 이 여기에 exe + ollama 런타임을 스테이징한다.

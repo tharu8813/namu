@@ -1428,17 +1428,41 @@ function editUserMessage(msgId) {
 }
 
 /* ---------- sheet plumbing ---------- */
+let _sheetReturnFocus = null;
 function openSheet(id) {
+  _sheetReturnFocus = document.activeElement;
   $("scrim").classList.add("open");
-  $(id).classList.add("open");
+  const sheet = $(id);
+  sheet.classList.add("open");
+  sheet.setAttribute("aria-modal", "true");
   if (id === "settingsSheet") renderSettings();
   if (id === "modelSheet") renderInstalled();
   if (id === "addModelSheet") { renderCatalog(); loadCatalog().then(renderCatalog); }
+  setTimeout(() => {
+    const f = sheet.querySelector("input:not([type=hidden]), textarea, select, button:not([data-close])") || sheet.querySelector("button");
+    f?.focus();
+  }, 40);
 }
 function closeSheet() {
   $("scrim").classList.remove("open");
-  document.querySelectorAll(".sheet.open").forEach((s) => s.classList.remove("open"));
+  document.querySelectorAll(".sheet.open").forEach((s) => { s.classList.remove("open"); s.removeAttribute("aria-modal"); });
+  if (_sheetReturnFocus && document.contains(_sheetReturnFocus)) _sheetReturnFocus.focus();
+  _sheetReturnFocus = null;
 }
+
+// 열린 시트 안에서 Tab 이 벗어나지 않도록 가둔다 (파일 미리보기 시트 포함).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  const sheet = document.querySelector(".sheet.open");
+  if (!sheet) return;
+  const f = [...sheet.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')]
+    .filter((el) => el.offsetParent !== null);
+  if (!f.length) return;
+  const [first, last] = [f[0], f[f.length - 1]];
+  if (!sheet.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
 function openSidebar() { $("sidebar").classList.add("open"); $("scrim").classList.add("open"); }
 function closeSidebar() { $("sidebar").classList.remove("open"); if (!document.querySelector(".sheet.open")) $("scrim").classList.remove("open"); }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { parseNDJSON, pullPercent, shouldCompress, humanBytes, humanTime, pullRate, ollamaError, renderMarkdown, renderTeX, highlightCode, checkAttachments, ATT_LIMITS, modelRefKey, isInstalledModel } from "./src/lib.js";
+import { parseNDJSON, pullPercent, shouldCompress, humanBytes, humanTime, pullRate, ollamaError, renderMarkdown, renderTeX, highlightCode, checkAttachments, ATT_LIMITS, modelRefKey, isInstalledModel, estimateTokens } from "./src/lib.js";
 import { locodeTier, salvageToolCalls, normalizePlan, commandPurpose, parseLocodeAction, normalizeEdits, windowMessages } from "./src/locode.js";
 import { lineDiff, diffStat, collapseDiff } from "./src/lib.js";
 
@@ -201,6 +201,17 @@ assert.ok(renderMarkdown("- 첫 줄이 길어서\n  다음 줄로 이어짐").in
   // 삽입만
   const ins = lineDiff("a\nc", "a\nb\nc");
   assert.deepEqual(diffStat(ins), { add: 1, del: 0 });
+}
+
+// estimateTokens — 토크나이저 없는 대략 추정 (CJK 는 글자당 토큰이 더 많음)
+{
+  assert.equal(estimateTokens(""), 0);
+  assert.equal(estimateTokens(null), 0);
+  // 라틴: ~4자/토큰
+  assert.equal(estimateTokens("a".repeat(40)), 10);
+  // 한글: ~1.5자/토큰 → 라틴 같은 길이보다 토큰이 많다
+  assert.ok(estimateTokens("가".repeat(40)) > estimateTokens("a".repeat(40)));
+  assert.equal(estimateTokens("가".repeat(30)), 20);
 }
 
 // collapseDiff — 안 바뀐 구간 접기

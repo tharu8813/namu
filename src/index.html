@@ -4,8 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="light dark" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23007aff'/%3E%3Crect x='24' y='30' width='52' height='36' rx='11' fill='white'/%3E%3Cpolygon points='36,60 36,80 54,62' fill='white'/%3E%3C/svg%3E" />
-<title>로컬 AI 채팅</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23007aff'/%3E%3Crect x='45' y='55' width='10' height='31' rx='4' fill='white'/%3E%3Ccircle cx='50' cy='41' r='21' fill='white'/%3E%3Ccircle cx='33.5' cy='50' r='15.5' fill='white'/%3E%3Ccircle cx='66.5' cy='50' r='15.5' fill='white'/%3E%3C/svg%3E" />
+<title>Namu</title>
 <style>
   :root {
     --bg: #f2f2f7;
@@ -337,6 +337,14 @@
   .composer textarea:focus { border-color: var(--accent); }
   .attach-strip { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .attach-strip:empty { display: none; }
+  .ctx-meter { display: flex; align-items: center; gap: 8px; padding: 0 2px; }
+  .ctx-bar { width: 120px; height: 3px; border-radius: 2px; background: var(--bg-sunken); overflow: hidden; flex: none; }
+  .ctx-fill { height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width 0.25s var(--ease), background 0.25s; }
+  .ctx-label { font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .ctx-meter.warn .ctx-fill { background: #e0932f; }
+  .ctx-meter.warn .ctx-label { color: #e0932f; }
+  .ctx-meter.danger .ctx-fill { background: var(--danger); }
+  .ctx-meter.danger .ctx-label { color: var(--danger); font-weight: 600; }
   .att-info { flex-basis: 100%; font-size: 11.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
   .att-info.over { color: var(--danger); font-weight: 600; }
   .att-chip {
@@ -718,7 +726,7 @@
 <div class="app">
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
-      <h1>채팅</h1>
+      <h1>Namu</h1>
       <button class="icon-btn" id="newChat" title="새 채팅" aria-label="새 채팅">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       </button>
@@ -766,6 +774,10 @@
       <div class="composer-mid">
         <div class="attach-strip" id="attachStrip"></div>
         <textarea id="input" rows="1" placeholder="메시지를 입력하세요…"></textarea>
+        <div class="ctx-meter" id="ctxMeter" hidden title="대략적인 컨텍스트 사용량 (토크나이저 없이 추정)">
+          <div class="ctx-bar"><div class="ctx-fill" id="ctxFill"></div></div>
+          <span class="ctx-label" id="ctxLabel"></span>
+        </div>
       </div>
       <button class="send" id="send" disabled aria-label="보내기">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4l17.45-8.05a1 1 0 0 0 0-1.8L3.4 3.6a1 1 0 0 0-1.4 1.03l1.1 6.87L14 12 3.1 12.5 2 19.37a1 1 0 0 0 1.4 1.03z"/></svg>

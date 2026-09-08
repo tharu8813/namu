@@ -25,3 +25,6 @@ src-tauri/ollama-bundle/
 .DS_Store
 Thumbs.db
 *.log
+
+# Inno Setup 빌드 산출물 (setup.iss 는 추적)
+installer/

@@ -11,14 +11,10 @@ if not exist node_modules (
   call npm install || exit /b 1
 )
 
-echo === 테스트 ===
-call node test.mjs || (echo [오류] 테스트 실패 - 빌드 중단 & exit /b 1)
-
-echo === 빌드 (tauri build) ===
-call npm run build || exit /b 1
+echo === 설치 프로그램 빌드 (테스트 + tauri build + Inno Setup) ===
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\build-installer.ps1" || exit /b 1
 
 echo.
 echo 완료.
-echo   실행 파일 : src-tauri\target\release\local-ai-chat.exe
-echo   설치본    : src-tauri\target\release\bundle\nsis\
+echo   설치본 : installer\output\Namu-Setup-*.exe
 endlocal

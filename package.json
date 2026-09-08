@@ -1,9 +1,9 @@
 {
-  "name": "local-ai-chat",
+  "name": "namu",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "여러 로컬 채팅 AI를 iOS 느낌의 GUI에서 사용하는 데스크톱 앱",
+  "description": "Namu (나무) — 여러 로컬 채팅 AI를 iOS 느낌의 GUI에서 사용하는 데스크톱 앱",
   "scripts": {
     "test": "node test.mjs",
     "dev": "tauri dev",

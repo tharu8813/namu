@@ -1,4 +1,4 @@
-import { pullPercent, shouldCompress, humanBytes, humanTime, pullRate, ollamaError, renderMarkdown, ATT_LIMITS, checkAttachments, isInstalledModel, modelRefKey } from "./lib.js";
+import { pullPercent, shouldCompress, humanBytes, humanTime, pullRate, ollamaError, renderMarkdown, ATT_LIMITS, checkAttachments, isInstalledModel, modelRefKey, estimateTokens } from "./lib.js";
 import { idbGetAll, idbGet, idbPut, idbDelete, idbBulkPut, migrateFromLocalStorage, storageAvailable } from "./store.js";
 import * as locode from "./locode.js";
 import { ollamaFetch, ollamaStream, isTauri, invoke as tauriInvokeRaw } from "./net.js";
@@ -178,6 +178,7 @@ async function addFiles(files) {
 function renderAttachStrip() {
   const el = $("attachStrip");
   el.innerHTML = "";
+  updateCtxMeter();
   if (!pending.length) return;
   const chk = checkAttachments(pending);
   const info = document.createElement("div");
@@ -281,12 +282,19 @@ async function refreshModels() {
   if (prevReach !== ollamaReachable || prevSignature !== models.map((m) => `${m.name}:${m.size || ""}`).sort().join("|")) renderMessages();
 }
 
+// 모델이 보고한 컨텍스트 길이(상한 16384). 알 수 없으면 8192. 게이지 표시와
+// /api/chat 의 num_ctx 에 같은 값을 써서 표시와 실제 동작을 맞춘다.
+function ctxLimit(model) {
+  const n = model ? modelCtxLen.get(model) || 0 : 0;
+  return n ? Math.min(n, 16384) : 8192;
+}
+
 async function chatStream(convo, onChunk, signal) {
   const body = {
     model: convo.model,
     messages: buildApiMessages(convo),
     stream: true,
-    options: { temperature: settings.temperature },
+    options: { temperature: settings.temperature, num_ctx: ctxLimit(convo.model) },
   };
   let streamErr = null;
   await ollamaStream(settings.ollamaUrl, "/api/chat", body, (o) => {
@@ -529,6 +537,7 @@ function renderModelPill() {
   if (state === "missing") parts.push("설치되지 않음");
   else if (state === "checking") parts.push("확인 중");
   $("modelMeta").textContent = parts.join(" · ");
+  updateCtxMeter(); // 모델이 바뀌면 한도도 바뀐다
 
   if (name && installed && !modelCaps.has(name)) modelHasVision(name).then(renderModelPill);
 }
@@ -552,6 +561,25 @@ function updateScrollBtn() {
 function announce(msg) {
   const s = $("srStatus");
   if (s) s.textContent = msg;
+}
+
+// 입력창 아래 대략적인 컨텍스트 사용량 게이지 (CHAT 모드 전용)
+function updateCtxMeter() {
+  const el = $("ctxMeter");
+  const c = active();
+  if (!c || c.mode === "locode" || !models.length) { el.hidden = true; return; }
+  let used = 0;
+  for (const m of buildApiMessages(c)) used += estimateTokens(m.content);
+  used += estimateTokens($("input").value);
+  for (const a of pending) if (a.kind === "text") used += estimateTokens(a.text);
+  if (used === 0) { el.hidden = true; return; }
+  const limit = ctxLimit(c.model);
+  const pct = Math.min(100, (used / limit) * 100);
+  el.hidden = false;
+  $("ctxFill").style.width = pct + "%";
+  $("ctxLabel").textContent = `대략 ${used.toLocaleString()} / ${limit.toLocaleString()} 토큰`;
+  el.classList.toggle("warn", pct >= 75 && pct < 92);
+  el.classList.toggle("danger", pct >= 92);
 }
 
 // 헤더 모드 세그먼트를 현재 대화에 맞춘다
@@ -775,6 +803,7 @@ function renderMessages() {
   const c = active();
   el.innerHTML = "";
   syncModeSeg();
+  updateCtxMeter();
 
   // LOCODE 모드 대화는 별도 화면
   if (c?.mode === "locode") {
@@ -792,7 +821,7 @@ function renderMessages() {
   }
 
   if (!c) {
-    el.innerHTML = `<div class="empty"><h2>로컬 AI 채팅</h2><p>새 채팅을 시작하거나 왼쪽에서 대화를 선택하세요.</p></div>`;
+    el.innerHTML = `<div class="empty"><h2>Namu</h2><p>새 채팅을 시작하거나 왼쪽에서 대화를 선택하세요.</p></div>`;
     return;
   }
   appendModelNotice(el, c);
@@ -1498,6 +1527,7 @@ const ta = $("input");
 ta.addEventListener("input", () => {
   ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
   updateSendState();
+  updateCtxMeter();
 });
 ta.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!streaming) send(); }
@@ -1515,7 +1545,7 @@ $("themeSeg").addEventListener("click", (e) => {
   settings.theme = b.dataset.theme; saveAll(); applyTheme(); renderSettings();
 });
 $("setUrl").addEventListener("change", () => { settings.ollamaUrl = $("setUrl").value.trim() || DEFAULTS.ollamaUrl; saveAll(); refreshModels(); });
-$("setSystem").addEventListener("change", () => { settings.systemPrompt = $("setSystem").value; saveAll(); });
+$("setSystem").addEventListener("change", () => { settings.systemPrompt = $("setSystem").value; saveAll(); updateCtxMeter(); });
 $("setTemp").addEventListener("input", () => { settings.temperature = parseFloat($("setTemp").value); $("setTempVal").textContent = settings.temperature.toFixed(1); saveAll(); });
 $("setCompress").addEventListener("click", () => { settings.compress.enabled = !settings.compress.enabled; saveAll(); renderSettings(); });
 $("setThreshold").addEventListener("input", () => { settings.compress.threshold = parseInt($("setThreshold").value); $("setThresholdVal").textContent = settings.compress.threshold; saveAll(); });

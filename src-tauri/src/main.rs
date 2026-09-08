@@ -23,16 +23,25 @@ fn ollama_up() -> bool {
     TcpStream::connect_timeout(&"127.0.0.1:11434".parse().unwrap(), Duration::from_millis(400)).is_ok()
 }
 
-/// 실행할 ollama 경로를 찾는다: ① 앱에 동봉된 resources/ollama/ollama.exe → ② PATH 의 ollama.
+/// 실행할 ollama 경로를 찾는다: ① 동봉 런타임 (설치 방식마다 위치가 달라 여러 후보를
+/// 확인한다) → ② PATH 의 ollama.
 fn find_ollama(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "ollama.exe" } else { "ollama" };
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(res) = app.path().resource_dir() {
-        let bundled = res.join("ollama").join(if cfg!(windows) { "ollama.exe" } else { "ollama" });
-        if bundled.exists() {
-            return Some(bundled);
+        candidates.push(res.join("ollama").join(name));
+    }
+    // Inno Setup 은 실행 파일 옆 ollama\ 에 둔다. NSIS/개발 빌드는 resources\ollama\ 를 쓴다.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("ollama").join(name));
+            candidates.push(dir.join("resources").join("ollama").join(name));
         }
     }
+    if let Some(hit) = candidates.into_iter().find(|p| p.exists()) {
+        return Some(hit);
+    }
     // PATH 에 있으면 이름만으로 실행 가능
-    let name = if cfg!(windows) { "ollama.exe" } else { "ollama" };
     if Command::new(name).arg("--version").output().is_ok() {
         return Some(PathBuf::from(name));
     }
@@ -121,7 +130,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
     let mut builder = TrayIconBuilder::with_id("main-tray")
-        .tooltip("로컬 AI 채팅")
+        .tooltip("Namu")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main(app),

@@ -1,8 +1,12 @@
 [package]
-name = "local-ai-chat"
+name = "namu"
 version = "0.1.0"
 edition = "2021"
-description = "로컬 AI 채팅"
+description = "Namu (나무) — 로컬 AI 채팅 · 프로젝트 에이전트"
+
+[[bin]]
+name = "Namu"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

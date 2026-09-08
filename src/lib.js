@@ -422,6 +422,25 @@ export function diffStat(diff) {
   return { add, del };
 }
 
+// 토크나이저 없이 대략적인 토큰 수 추정. CJK 는 BPE 에서 토큰당 글자 수가 적고
+// (한글/한자 ≈ 1.5자/토큰), 라틴 문자는 ≈ 4자/토큰. 정확한 값이 아니라 "감" 용도.
+export function estimateTokens(text) {
+  if (!text) return 0;
+  let cjk = 0;
+  for (const ch of String(text)) {
+    const c = ch.codePointAt(0);
+    if (
+      (c >= 0x1100 && c <= 0x11ff) || // 한글 자모
+      (c >= 0x3000 && c <= 0x9fff) || // CJK 기호·부수·한자
+      (c >= 0xac00 && c <= 0xd7a3) || // 한글 음절
+      (c >= 0xf900 && c <= 0xfaff) || // CJK 호환 한자
+      (c >= 0x20000 && c <= 0x2ffff)  // CJK 확장
+    ) cjk++;
+  }
+  const rest = String(text).length - cjk;
+  return Math.ceil(cjk / 1.5 + rest / 4);
+}
+
 // 요약(컨텍스트 압축)을 돌릴지 여부. messages 는 summarizedUpTo 이후의 라이브 메시지들.
 export function shouldCompress(messages, opts) {
   const { enabled, threshold } = opts || {};

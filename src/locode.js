@@ -11,6 +11,95 @@ let pendingApproval = null;   // { resolve, convo, action }
 let activeRun = null;         // { id, convo, record } — Rust가 실제 프로세스를 소유한다
 let autoApproveRun = false;   // 이번 locodeSend 동안 나머지 변경 자동 승인 (삭제·재확인 명령 제외)
 
+// ---------- 파일 트리 (읽기 전용, 지연 로드) ----------
+const treeCache = new Map();   // rel dir path -> entries[] | {error}
+const treeOpen = new Set();    // 펼쳐진 dir path
+const treeLoading = new Set(); // 중복 요청 방지
+let treeRoot = null;           // 캐시가 유효한 프로젝트 경로
+const fmtTreeSize = (n) => (n < 1024 ? n + "B" : n < 1048576 ? (n / 1024).toFixed(0) + "K" : (n / 1048576).toFixed(1) + "M");
+
+function resetTree() { treeCache.clear(); treeOpen.clear(); treeLoading.clear(); treeRoot = null; }
+
+async function loadTreeDir(path) {
+  if (treeLoading.has(path)) return;
+  treeLoading.add(path);
+  try { treeCache.set(path, await invoke("locode_list_dir", { rel: path })); }
+  catch (e) { treeCache.set(path, { error: String(e) }); }
+  finally { treeLoading.delete(path); }
+  ctx.rerender();
+}
+
+function renderFileTree(convo) {
+  if (treeRoot !== activeRoot) { resetTree(); treeRoot = activeRoot; }
+  const box = document.createElement("section");
+  box.className = "lc-tree";
+  const head = document.createElement("div");
+  head.className = "lc-panel-head";
+  head.innerHTML = `<span>파일</span>`;
+  const refresh = document.createElement("button");
+  refresh.className = "lc-panel-action"; refresh.type = "button"; refresh.textContent = "새로고침";
+  refresh.onclick = () => { treeCache.clear(); loadTreeDir(""); };
+  head.appendChild(refresh);
+  box.appendChild(head);
+
+  if (!treeCache.has("")) loadTreeDir("");
+  const listWrap = document.createElement("div");
+  listWrap.className = "lc-tree-list";
+  renderTreeLevel(convo, listWrap, "", 0);
+  box.appendChild(listWrap);
+  return box;
+}
+
+function renderTreeLevel(convo, container, dirPath, depth) {
+  const pad = depth * 13 + 12;
+  const entries = treeCache.get(dirPath);
+  if (!entries) {
+    const l = document.createElement("div");
+    l.className = "lc-tree-msg"; l.style.paddingLeft = pad + "px"; l.textContent = "불러오는 중…";
+    container.appendChild(l);
+    return;
+  }
+  if (entries.error) {
+    const l = document.createElement("div");
+    l.className = "lc-tree-msg err"; l.style.paddingLeft = pad + "px"; l.textContent = entries.error;
+    container.appendChild(l);
+    return;
+  }
+  if (!entries.length) {
+    const l = document.createElement("div");
+    l.className = "lc-tree-msg"; l.style.paddingLeft = pad + "px"; l.textContent = "(빈 폴더)";
+    container.appendChild(l);
+    return;
+  }
+  for (const e of entries) {
+    const rel = dirPath ? dirPath + "/" + e.name : e.name;
+    const isDir = e.kind === "dir";
+    const open = treeOpen.has(rel);
+    const row = document.createElement("div");
+    row.className = "lc-tree-row" + (e.hidden ? " hidden" : "");
+    row.style.paddingLeft = pad + "px";
+    row.innerHTML = `<span class="lc-tree-tw">${isDir ? (open ? "▾" : "▸") : ""}</span>` +
+      `<span class="lc-tree-ico">${isDir ? "📁" : "📄"}</span>` +
+      `<span class="lc-tree-name"></span>` +
+      `${!isDir && e.size ? `<span class="lc-tree-size">${fmtTreeSize(e.size)}</span>` : ""}`;
+    row.querySelector(".lc-tree-name").textContent = e.name;
+    row.onclick = () => {
+      if (isDir) {
+        if (treeOpen.has(rel)) treeOpen.delete(rel);
+        else { treeOpen.add(rel); if (!treeCache.has(rel)) loadTreeDir(rel); }
+        ctx.rerender();
+      } else {
+        locodePreviewFile(convo, rel);
+      }
+    };
+    container.appendChild(row);
+    if (isDir && open) {
+      if (!treeCache.has(rel)) loadTreeDir(rel);
+      renderTreeLevel(convo, container, rel, depth + 1);
+    }
+  }
+}
+
 export function locodeInit(c) { ctx = c; }
 
 export function hasTauri() {
@@ -60,6 +149,7 @@ export async function locodeCloseProject(convo) {
   convo.project = null;
   convo.git = null;
   activeRoot = null;
+  resetTree();
   ctx.save();
   ctx.rerender();
 }
@@ -519,6 +609,7 @@ export function hasPendingApproval() { return !!pendingApproval; }
 function recordChange(convo, ch) {
   convo.changes = convo.changes || [];
   convo.changes.push({ id: ctx.uid(), ts: Date.now(), reverted: false, ...ch });
+  treeCache.clear(); // 새 파일·삭제가 트리에 반영되도록 (펼쳐진 폴더는 다음 렌더에서 다시 읽음)
 }
 
 export async function revertChange(convo, changeId) {
@@ -795,10 +886,11 @@ export function renderLocode(el, convo) {
   panels.className = "lc-panels";
   panels.open = !!convo.locodePanelsOpen;
   panels.addEventListener("toggle", () => { convo.locodePanelsOpen = panels.open; });
-  const nPanel = (convo.locodePlan?.steps?.length ? 1 : 0) + (convo.git?.is_git ? 1 : 0) + (convo.changes?.length ? 1 : 0) + (convo.commandRuns?.length ? 1 : 0) + 1;
-  panels.innerHTML = `<summary>작업 패널 (${nPanel}) · 계획 / Git / 기록 / 변경</summary>`;
+  const nPanel = (convo.locodePlan?.steps?.length ? 1 : 0) + (convo.git?.is_git ? 1 : 0) + (convo.changes?.length ? 1 : 0) + (convo.commandRuns?.length ? 1 : 0) + 2;
+  panels.innerHTML = `<summary>작업 패널 (${nPanel}) · 파일 / 계획 / Git / 기록 / 변경</summary>`;
   const pbody = document.createElement("div");
   pbody.className = "lc-panels-body";
+  pbody.appendChild(renderFileTree(convo));
   if (convo.locodePlan?.steps?.length) pbody.appendChild(renderPlanPanel(convo));
   if (convo.git?.is_git) pbody.appendChild(renderGitPanel(convo));
   pbody.appendChild(renderAuditPanel(convo));

@@ -15,6 +15,12 @@ const DEFAULTS = {
   compress: { enabled: false, threshold: 20, keepRecent: 6 },
 };
 const KEEP_RECENT = 6;
+const QUICKSTARTS = [
+  "이 코드를 리뷰하고 개선점을 알려줘",
+  "아래 내용을 세 줄로 요약해줘",
+  "이 개념을 쉽게 설명해줘",
+  "정중한 이메일 초안을 써줘",
+];
 
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
@@ -55,6 +61,7 @@ async function initStore() {
     if (!c.created) c.created = Date.now();
     if (!c.updated) c.updated = c.created;
     c.title = typeof c.title === "string" ? c.title.slice(0, 80) : "새 채팅";
+    c.pinned = !!c.pinned;
     c.mode = c.mode === "locode" ? "locode" : "chat";
     c.model = typeof c.model === "string" ? c.model.trim() : "";
     c.messages = Array.isArray(c.messages) ? c.messages.filter((m) => m && typeof m === "object") : [];
@@ -340,6 +347,29 @@ async function maybeCompress(convo) {
 /* ---------- rendering ---------- */
 const MORE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>`;
 
+const PIN_ICON = `<svg class="pin-ico" viewBox="0 0 24 24" fill="currentColor"><path d="M14 4l6 6-3 1-3 4 1 4-3 2-2-5-5 5-1-1 5-5-5-2 2-3 4 1 4-3z"/></svg>`;
+
+// updated(ms) → 사이드바 그룹 이름
+function convoGroup(ts) {
+  const d = new Date(ts || 0);
+  const now = new Date();
+  const day = 864e5;
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (d.getTime() >= startToday) return "오늘";
+  if (d.getTime() >= startToday - day) return "어제";
+  if (d.getTime() >= startToday - 7 * day) return "지난 7일";
+  if (d.getTime() >= startToday - 30 * day) return "지난 30일";
+  return "이전";
+}
+
+let convoQuery = "";
+
+function convoMatches(c, q) {
+  if (!q) return true;
+  if ((c.title || "").toLowerCase().includes(q)) return true;
+  return c.messages.some((m) => m.role !== "system" && (m.content || "").toLowerCase().includes(q));
+}
+
 function renderConvoList() {
   const el = $("convoList");
   el.innerHTML = "";
@@ -347,11 +377,30 @@ function renderConvoList() {
     el.innerHTML = `<p class="convo-empty">채팅이 없습니다.<br>＋ 버튼으로 새 채팅을 시작하세요.</p>`;
     return;
   }
-  for (const c of convos) {
+  const q = convoQuery.trim().toLowerCase();
+  const list = convos.filter((c) => convoMatches(c, q))
+    .slice()
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updated || 0) - (a.updated || 0));
+  if (!list.length) {
+    el.innerHTML = `<p class="convo-empty">"${escapeHtml(convoQuery)}" 와 일치하는 대화가 없습니다.</p>`;
+    return;
+  }
+
+  let lastGroup = null;
+  for (const c of list) {
+    const group = c.pinned ? "고정됨" : convoGroup(c.updated);
+    if (group !== lastGroup) {
+      lastGroup = group;
+      const h = document.createElement("div");
+      h.className = "convo-group";
+      h.textContent = group;
+      el.appendChild(h);
+    }
     const d = document.createElement("div");
     d.className = "convo" + (c.id === activeId ? " active" : "");
+    d.dataset.cid = c.id;
     const last = [...c.messages].reverse().find((m) => m.role !== "system" && (m.content || m.error || m.attachments?.length));
-    d.innerHTML = `<div class="convo-main"><span class="title"></span><span class="preview"></span></div>
+    d.innerHTML = `<div class="convo-main"><span class="title-row">${c.pinned ? PIN_ICON : ""}<span class="title"></span></span><span class="preview"></span></div>
       <button class="convo-more" aria-label="대화 메뉴">${MORE_ICON}</button>`;
     d.querySelector(".title").textContent = c.title || "새 채팅";
     const preview = last
@@ -370,19 +419,46 @@ function renderConvoList() {
   }
 }
 
+function togglePin(id) {
+  const c = convos.find((x) => x.id === id);
+  if (!c) return;
+  c.pinned = !c.pinned;
+  saveAll();
+  renderConvoList();
+  toast(c.pinned ? "대화를 고정했습니다" : "고정을 해제했습니다");
+}
+
+// 대화를 마크다운으로 클립보드에 복사
+function exportConvo(id) {
+  const c = convos.find((x) => x.id === id);
+  if (!c) return;
+  const out = [`# ${c.title || "대화"}`, "", `_모델: ${c.model || "—"} · ${new Date(c.updated || Date.now()).toLocaleString("ko-KR")}_`, ""];
+  for (const m of c.messages) {
+    if (m.role === "system" || (!m.content && !m.attachments?.length)) continue;
+    out.push(`## ${m.role === "user" ? "나" : "AI"}`, "");
+    if (m.attachments?.length) out.push(`_첨부: ${m.attachments.map((a) => a.name || "이미지").join(", ")}_`, "");
+    out.push(m.content || "", "");
+  }
+  copyToClipboard(out.join("\n").trim());
+}
+
 function openConvoMenu(anchor, c) {
   closeConvoMenu();
   const menu = document.createElement("div");
   menu.className = "popmenu";
   menu.id = "convoMenu";
   menu.innerHTML = `
+    <button data-act="pin">${c.pinned ? "고정 해제" : "상단 고정"}</button>
     <button data-act="rename">이름 변경</button>
+    <button data-act="export">내보내기 (복사)</button>
     <button data-act="delete" class="danger">삭제</button>`;
   document.body.appendChild(menu);
   const r = anchor.getBoundingClientRect();
   menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
   menu.style.left = `${Math.min(r.left, innerWidth - menu.offsetWidth - 8)}px`;
+  menu.querySelector('[data-act="pin"]').onclick = () => { closeConvoMenu(); togglePin(c.id); };
   menu.querySelector('[data-act="rename"]').onclick = () => { closeConvoMenu(); renameConvo(c.id); };
+  menu.querySelector('[data-act="export"]').onclick = () => { closeConvoMenu(); exportConvo(c.id); };
   menu.querySelector('[data-act="delete"]').onclick = () => { closeConvoMenu(); deleteConvo(c.id); };
   setTimeout(() => document.addEventListener("click", closeConvoMenu, { once: true }), 0);
 }
@@ -391,8 +467,7 @@ function closeConvoMenu() { $("convoMenu")?.remove(); }
 function renameConvo(id) {
   const c = convos.find((x) => x.id === id);
   if (!c) return;
-  const idx = convos.indexOf(c);
-  const titleEl = [...$("convoList").querySelectorAll(".convo")][idx]?.querySelector(".title");
+  const titleEl = $("convoList").querySelector(`.convo[data-cid="${id}"] .title`);
   if (!titleEl) return;
 
   const input = document.createElement("input");
@@ -448,6 +523,22 @@ function renderModelPill() {
 function scrollMessages() {
   const el = $("messages");
   el.scrollTop = el.scrollHeight;
+}
+
+// 스트리밍 중에도 사용자가 위로 스크롤해 읽고 있으면 강제로 끌어내리지 않는다.
+function isNearBottom() {
+  const el = $("messages");
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+}
+function scrollIfAtBottom() {
+  if (isNearBottom()) scrollMessages();
+}
+function updateScrollBtn() {
+  $("scrollBottom").classList.toggle("show", !isNearBottom() && $("messages").scrollHeight > $("messages").clientHeight + 40);
+}
+function announce(msg) {
+  const s = $("srStatus");
+  if (s) s.textContent = msg;
 }
 
 // 헤더 모드 세그먼트를 현재 대화에 맞춘다
@@ -693,7 +784,23 @@ function renderMessages() {
   }
   appendModelNotice(el, c);
   if (!c.messages.length) {
-    el.innerHTML = `<div class="empty"><h2>${escapeHtml(c.model || "모델을 선택하세요")}</h2><p>메시지를 입력해 대화를 시작하세요.</p></div>`;
+    const box = document.createElement("div");
+    box.className = "empty";
+    box.innerHTML = `<h2>${escapeHtml(c.model || "모델을 선택하세요")}</h2><p>메시지를 입력해 대화를 시작하세요.</p><div class="quickstarts"></div>`;
+    const qs = box.querySelector(".quickstarts");
+    for (const p of QUICKSTARTS) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = p;
+      b.onclick = () => {
+        const ta = $("input");
+        ta.value = p;
+        ta.focus();
+        ta.dispatchEvent(new Event("input"));
+      };
+      qs.appendChild(b);
+    }
+    el.appendChild(box);
     return;
   }
   const lastUserId = [...c.messages].reverse().find((m) => m.role === "user")?.id;
@@ -788,6 +895,7 @@ function renderMessages() {
     el.appendChild(row);
   }
   scrollMessages();
+  updateScrollBtn();
 }
 
 function appendModelNotice(el, c) {
@@ -1176,11 +1284,12 @@ async function runAssistantTurn(c) {
 
   let aborted = false;
   const signal = abortCtrl.signal;
+  announce("응답 생성 중");
   try {
     await chatStream(c, (chunk) => {
       msg.content += chunk;
       const md = document.querySelector(`[data-mid="${msg.id}"] .md`);
-      if (md) { md.innerHTML = renderMarkdown(msg.content); scrollMessages(); }
+      if (md) { md.innerHTML = renderMarkdown(msg.content); scrollIfAtBottom(); updateScrollBtn(); }
     }, signal);
     if (signal.aborted) aborted = true; // Rust 프록시는 취소 시 예외 없이 끝난다
   } catch (e) {
@@ -1206,6 +1315,7 @@ async function runAssistantTurn(c) {
   if (!msg.content && !msg.error && aborted) {
     c.messages = c.messages.filter((x) => x.id !== msg.id);
   }
+  announce(msg.error ? "응답 실패" : aborted ? "생성이 중단되었습니다" : "응답 완료");
   saveAll();
   renderConvoList();
   renderMessages();
@@ -1336,6 +1446,15 @@ $("pullCancel").onclick = () => {
 $("pullName").addEventListener("keydown", (e) => { if (e.key === "Enter") pullModel(); });
 $("catSearch").addEventListener("input", renderCatalog);
 $("instSearch").addEventListener("input", renderInstalled);
+
+let _convoSearchTimer = null;
+$("convoSearch").addEventListener("input", (e) => {
+  convoQuery = e.target.value;
+  clearTimeout(_convoSearchTimer);
+  _convoSearchTimer = setTimeout(renderConvoList, 120);
+});
+$("scrollBottom").onclick = () => { scrollMessages(); updateScrollBtn(); };
+$("messages").addEventListener("scroll", updateScrollBtn, { passive: true });
 
 $("send").onclick = () => { (streaming || locode.locodeRunning()) ? stopStreaming() : send(); };
 const ta = $("input");

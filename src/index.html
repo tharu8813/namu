@@ -119,7 +119,7 @@
   }
 
   /* ---------- Main ---------- */
-  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); position: relative; }
   .chat-header {
     display: flex; align-items: center; gap: 10px;
     padding: 10px 14px; border-bottom: 0.5px solid var(--separator);
@@ -619,6 +619,52 @@
   @keyframes blink { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 
+  /* ---------- 사이드바 검색 / 그룹 / 고정 ---------- */
+  .convo-filter { padding: 4px 12px 8px; }
+  .convo-filter input {
+    width: 100%; border: 0.5px solid var(--separator); background: var(--bg);
+    color: var(--text); border-radius: 9px; padding: 7px 10px; font: inherit; font-size: 13.5px; outline: none;
+  }
+  .convo-filter input:focus { border-color: var(--accent); }
+  .convo-group {
+    padding: 10px 12px 4px; font-size: 11px; font-weight: 700; color: var(--text-secondary);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .convo-group:first-child { padding-top: 2px; }
+  .convo .title-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .convo .pin-ico { flex: none; width: 11px; height: 11px; color: var(--text-secondary); }
+
+  /* ---------- 빈 화면 퀵스타트 ---------- */
+  .quickstarts { display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; margin-top: 14px; max-width: 440px; }
+  .quickstarts button {
+    padding: 8px 13px; border-radius: 999px; border: 0.5px solid var(--separator);
+    background: var(--bg-elevated); color: var(--text); font-size: 13px; font-weight: 500;
+    transition: border-color 0.15s var(--ease), transform 0.15s var(--ease);
+  }
+  .quickstarts button:hover { border-color: var(--accent); transform: translateY(-1px); }
+
+  /* ---------- 하단 이동 버튼 ---------- */
+  .scroll-bottom {
+    position: absolute; right: 18px; bottom: 88px; z-index: 6;
+    width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center;
+    background: var(--bg-elevated); color: var(--accent);
+    border: 0.5px solid var(--separator); box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+    opacity: 0; transform: translateY(8px) scale(0.9); pointer-events: none;
+    transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
+  }
+  .scroll-bottom.show { opacity: 1; transform: none; pointer-events: auto; }
+  .scroll-bottom svg { width: 18px; height: 18px; }
+
+  /* ---------- 키보드 포커스 링 일관화 ---------- */
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .bubble a:focus-visible { outline-offset: 1px; }
+
+  /* 스크린리더 전용 */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
   @media (max-width: 720px) {
     .app { grid-template-columns: 1fr; }
     .sidebar {
@@ -639,6 +685,9 @@
       <button class="icon-btn" id="newChat" title="새 채팅" aria-label="새 채팅">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       </button>
+    </div>
+    <div class="convo-filter">
+      <input type="search" id="convoSearch" placeholder="대화 검색" aria-label="대화 검색" autocomplete="off" />
     </div>
     <div class="convo-list" id="convoList"></div>
   </aside>
@@ -665,7 +714,11 @@
       </button>
     </header>
 
-    <div class="messages" id="messages"></div>
+    <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions" aria-label="대화"></div>
+    <button class="scroll-bottom" id="scrollBottom" type="button" aria-label="최신 메시지로 이동">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+    </button>
+    <span class="sr-only" id="srStatus" aria-live="assertive"></span>
 
     <div class="composer">
       <button class="attach" id="attach" aria-label="파일 첨부">

@@ -1,0 +1,20 @@
+[package]
+name = "local-ai-chat"
+version = "0.1.0"
+edition = "2021"
+description = "로컬 AI 채팅"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+sysinfo = { version = "0.33", default-features = false, features = ["disk"] }
+serde = { version = "1", features = ["derive"] }
+rfd = "0.15"
+ureq = "2"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "s"

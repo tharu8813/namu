@@ -1,0 +1,16 @@
+{
+  "name": "local-ai-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "여러 로컬 채팅 AI를 iOS 느낌의 GUI에서 사용하는 데스크톱 앱",
+  "scripts": {
+    "test": "node test.mjs",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

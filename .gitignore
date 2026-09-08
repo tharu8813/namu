@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/gen/
+
+# Bundled Ollama runtime — 2.8GB, regenerate with scripts/prepare-ollama-bundle.ps1
+src-tauri/ollama-bundle/
+
+# Stray runtime binaries at repo root (not source)
+/ollama.exe
+/llama-server.exe
+/llama-quantize.exe
+/ggml-base.dll
+
+# LOCODE runtime audit log
+.locode/
+
+# Claude Code local state
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Tauri 디버그 실행",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/src-tauri/target/debug/local-ai-chat.exe",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "tauri:build-debug",
+      "environment": [{ "name": "RUST_BACKTRACE", "value": "1" }],
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "테스트 (test.mjs) 디버그",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/test.mjs",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ]
+}

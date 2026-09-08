@@ -587,6 +587,18 @@
   .lc-ap-diff .dl-add { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
   .lc-ap-diff .dl-del { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
   .lc-ap-diff .dl-ctx { color: var(--text-secondary); }
+  .lc-ap-diff .dl-gap { color: var(--text-secondary); text-align: center; opacity: 0.7; user-select: none; }
+  .fp-diff .dl-gap, .file-preview .dl-gap { color: var(--text-secondary); opacity: 0.7; text-align: center; }
+  .lc-ap-edit { margin: 0 14px 8px; }
+  .lc-ap-edit summary { font-size: 12px; color: var(--accent); cursor: pointer; padding: 2px 0; }
+  .lc-ap-edit textarea {
+    width: 100%; margin-top: 6px; min-height: 140px; max-height: 320px; resize: vertical;
+    border: 0.5px solid var(--separator); border-radius: 8px; padding: 8px 10px;
+    background: var(--bg); color: var(--text); font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; outline: none;
+  }
+  .lc-ap-edit textarea:focus { border-color: var(--accent); }
+  .lc-ap-auto { display: flex; align-items: center; gap: 7px; padding: 0 14px 10px; font-size: 12px; color: var(--text-secondary); }
+  .lc-ap-auto input { accent-color: var(--accent); }
   .lc-ap-note { padding: 0 14px 8px; font-size: 12px; color: var(--danger); }
   .lc-confirm { display: flex; align-items: center; gap: 6px; padding: 0 14px 8px; font-size: 12px; color: var(--danger); }
   .lc-confirm input { width: 70px; border: 0.5px solid var(--danger); border-radius: 6px; background: var(--bg); color: var(--text); padding: 4px 6px; font: inherit; }

@@ -388,6 +388,30 @@ export function lineDiff(before, after) {
   return out;
 }
 
+// 바뀌지 않은(ctx) 라인이 pad*2 개를 넘게 연속되면 가운데를 접는다.
+// 반환 배열에는 { type:"gap", count } 마커가 들어갈 수 있다.
+export function collapseDiff(diff, pad = 3) {
+  const list = diff || [];
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (run.length > pad * 2 + 1) {
+      out.push(...run.slice(0, pad));
+      out.push({ type: "gap", count: run.length - pad * 2 });
+      out.push(...run.slice(-pad));
+    } else {
+      out.push(...run);
+    }
+    run = [];
+  };
+  for (const d of list) {
+    if (d.type === "ctx") run.push(d);
+    else { flush(); out.push(d); }
+  }
+  flush();
+  return out;
+}
+
 // diff 의 추가/삭제 라인 수
 export function diffStat(diff) {
   let add = 0, del = 0;

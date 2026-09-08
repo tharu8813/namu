@@ -1,6 +1,6 @@
 // locode.js — LOCODE 모드 (Phase 2: 읽기 + 승인제 파일 쓰기)
 // 프로젝트 열기 / 파일 트리 / 읽기·검색·수정 에이전트 루프 + diff 승인 + 변경 원장.
-import { ollamaError, renderMarkdown, lineDiff, diffStat } from "./lib.js";
+import { ollamaError, renderMarkdown, lineDiff, diffStat, collapseDiff } from "./lib.js";
 import { ollamaFetch, invoke, isTauri } from "./net.js";
 
 let ctx = null;
@@ -9,6 +9,7 @@ let running = false;
 const mtimeCache = new Map(); // rel path -> mtime (외부 변경 감지)
 let pendingApproval = null;   // { resolve, convo, action }
 let activeRun = null;         // { id, convo, record } — Rust가 실제 프로세스를 소유한다
+let autoApproveRun = false;   // 이번 locodeSend 동안 나머지 변경 자동 승인 (삭제·재확인 명령 제외)
 
 export function locodeInit(c) { ctx = c; }
 
@@ -504,10 +505,11 @@ function requestApproval(convo, action) {
     ctx.rerender();
   });
 }
-export function resolveApproval(verdict, editedContent, confirmed = false) {
+export function resolveApproval(verdict, editedContent, confirmed = false, autoRest = false) {
   if (!pendingApproval) return;
   const p = pendingApproval;
   pendingApproval = null;
+  if (autoRest && verdict === "approve") autoApproveRun = true;
   p.resolve({ verdict, content: editedContent, confirmed });
   ctx.rerender();
 }
@@ -564,6 +566,7 @@ export async function locodeSend(convo, text) {
   convo.updated = Date.now();
   running = true;
   stopFlag = false;
+  autoApproveRun = false;
   ctx.rerender();
 
   const model = convo.model;
@@ -884,8 +887,12 @@ function renderPermBar(convo) {
 // blocked 명령은 어떤 모드에서도 자동 승인하지 않는다.
 function autoApprove(convo, kind, policyLevel) {
   const mode = convo.locodePermMode || "ask";
-  if (mode === "ask") return null;
   if (policyLevel === "blocked") return null;
+  // 사용자가 승인 카드에서 "나머지 자동 승인"을 선택한 경우 — 삭제·재확인 명령은 계속 확인
+  if (autoApproveRun && kind !== "delete_path" && policyLevel !== "reconfirm") {
+    return { verdict: "approve", content: undefined, confirmed: true };
+  }
+  if (mode === "ask") return null;
   if (mode === "all") return { verdict: "approve", content: undefined, confirmed: true };
   if (mode === "safe") {
     if (policyLevel === "reconfirm") return null; // 위험 명령은 확인
@@ -1051,7 +1058,9 @@ function renderLedger(convo) {
 }
 
 function diffText(diff) {
-  return diff.map((d) => (d.type === "add" ? "+ " : d.type === "del" ? "- " : "  ") + d.text).join("\n");
+  return collapseDiff(diff)
+    .map((d) => (d.type === "gap" ? `  ⋯ ${d.count}줄 생략 ⋯` : (d.type === "add" ? "+ " : d.type === "del" ? "- " : "  ") + d.text))
+    .join("\n");
 }
 
 function renderCheckSummary(convo) {
@@ -1113,6 +1122,7 @@ function renderApprovalCard(action) {
   const target = action.kind === "move_path" ? `${action.from} → ${action.to}` : action.kind === "run_command" ? action.command : action.path;
 
   const stat = action.diff ? diffStat(action.diff) : null;
+  const editable = action.kind === "write_file" && typeof action.content === "string";
   card.innerHTML = `
     <div class="lc-ap-head ${isDanger ? "danger" : ""}">
       ${isDanger ? "⚠️ " : ""}${kindLabel} 승인 필요
@@ -1121,9 +1131,11 @@ function renderApprovalCard(action) {
     <div class="lc-ap-target"></div>
     ${action.summary ? `<div class="lc-ap-summary"></div>` : ""}
     ${action.diff ? `<pre class="lc-ap-diff"></pre>` : ""}
+    ${editable ? `<details class="lc-ap-edit"><summary>제안 내용 직접 수정</summary><textarea spellcheck="false"></textarea></details>` : ""}
     ${action.kind === "delete_path" ? `<div class="lc-ap-note">이 파일이 삭제됩니다. 되돌리기로 복구할 수 있습니다.</div>` : ""}
     ${action.kind === "run_command" ? `<div class="lc-ap-note">작업 폴더: <code></code><br>${action.policy || "출력과 실행 시간이 제한됩니다."}</div>` : ""}
     ${action.reconfirm ? `<label class="lc-confirm">계속하려면 <b>실행</b>을 입력하세요 <input id="apConfirm" autocomplete="off" /></label>` : ""}
+    ${!isDanger && !action.reconfirm ? `<label class="lc-ap-auto"><input type="checkbox" id="apAuto" /> 이 작업의 남은 변경은 자동 승인 (삭제·설치·네트워크 제외)</label>` : ""}
     <div class="lc-ap-actions">
       <button class="btn ${isDanger ? "danger" : ""}" id="apOk" type="button">${isDanger ? "삭제/이동 실행" : "승인"}</button>
       <button class="btn secondary" id="apNo" type="button">거부</button>
@@ -1131,25 +1143,29 @@ function renderApprovalCard(action) {
   card.querySelector(".lc-ap-target").textContent = target;
   if (action.kind === "run_command") card.querySelector(".lc-ap-note code").textContent = action.cwd || "프로젝트 루트";
   if (action.summary) card.querySelector(".lc-ap-summary").textContent = action.summary;
+  if (editable) card.querySelector(".lc-ap-edit textarea").value = action.content;
   if (action.diff) {
     const pre = card.querySelector(".lc-ap-diff");
-    for (const d of action.diff.slice(0, 400)) {
+    const collapsed = collapseDiff(action.diff);
+    for (const d of collapsed.slice(0, 400)) {
       const line = document.createElement("div");
-      line.className = "dl-" + d.type;
-      line.textContent = (d.type === "add" ? "+ " : d.type === "del" ? "- " : "  ") + d.text;
+      if (d.type === "gap") { line.className = "dl-gap"; line.textContent = `⋯ ${d.count}줄 생략 ⋯`; }
+      else { line.className = "dl-" + d.type; line.textContent = (d.type === "add" ? "+ " : d.type === "del" ? "- " : "  ") + d.text; }
       pre.appendChild(line);
     }
-    if (action.diff.length > 400) {
+    if (collapsed.length > 400) {
       const more = document.createElement("div");
       more.className = "dl-ctx";
-      more.textContent = `… (${action.diff.length - 400}줄 더)`;
+      more.textContent = `… (${collapsed.length - 400}줄 더)`;
       pre.appendChild(more);
     }
   }
   card.querySelector("#apOk").onclick = () => {
     const ok = !action.reconfirm || card.querySelector("#apConfirm")?.value.trim() === "실행";
     if (!ok) { ctx.toast('확인란에 "실행"을 입력하세요'); return; }
-    resolveApproval("approve", undefined, ok);
+    const ta = card.querySelector(".lc-ap-edit textarea");
+    const content = ta && ta.value !== action.content ? ta.value : undefined;
+    resolveApproval("approve", content, ok, !!card.querySelector("#apAuto")?.checked);
   };
   card.querySelector("#apNo").onclick = () => resolveApproval("reject");
   return card;

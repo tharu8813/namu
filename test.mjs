@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { parseNDJSON, pullPercent, shouldCompress, humanBytes, humanTime, pullRate, ollamaError, renderMarkdown, renderTeX, highlightCode, checkAttachments, ATT_LIMITS, modelRefKey, isInstalledModel } from "./src/lib.js";
 import { locodeTier, salvageToolCalls, normalizePlan, commandPurpose, parseLocodeAction, normalizeEdits, windowMessages } from "./src/locode.js";
-import { lineDiff, diffStat } from "./src/lib.js";
+import { lineDiff, diffStat, collapseDiff } from "./src/lib.js";
 
 // parseNDJSON: 잘린 마지막 줄 보존
 {
@@ -201,6 +201,19 @@ assert.ok(renderMarkdown("- 첫 줄이 길어서\n  다음 줄로 이어짐").in
   // 삽입만
   const ins = lineDiff("a\nc", "a\nb\nc");
   assert.deepEqual(diffStat(ins), { add: 1, del: 0 });
+}
+
+// collapseDiff — 안 바뀐 구간 접기
+{
+  const ctx = (n) => Array.from({ length: n }, (_, i) => ({ type: "ctx", text: "c" + i }));
+  // 짧은 ctx 구간은 그대로
+  assert.deepEqual(collapseDiff([...ctx(3), { type: "add", text: "x" }]).filter((d) => d.type === "gap"), []);
+  // 긴 ctx 구간은 pad*2 만 남기고 gap 마커
+  const c = collapseDiff([...ctx(20), { type: "add", text: "x" }], 3);
+  const gap = c.find((d) => d.type === "gap");
+  assert.ok(gap && gap.count === 14);
+  assert.equal(c.filter((d) => d.type === "ctx").length, 6);
+  assert.equal(c[c.length - 1].text, "x");
 }
 
 // salvageToolCalls — 모델이 tool_call 을 텍스트로 뱉는 경우

@@ -8,7 +8,8 @@ description = "로컬 AI 채팅"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
 sysinfo = { version = "0.33", default-features = false, features = ["disk"] }
 serde = { version = "1", features = ["derive"] }
 rfd = "0.15"

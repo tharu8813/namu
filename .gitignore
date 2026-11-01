@@ -1,5 +1,7 @@
 # dependencies
 node_modules/
+.tools/
+graphify-out/
 
 # Rust / Tauri build output
 src-tauri/target/
@@ -28,3 +30,5 @@ Thumbs.db
 
 # Inno Setup 빌드 산출물 (setup.iss 는 추적)
 installer/
+test-results/
+playwright-report/

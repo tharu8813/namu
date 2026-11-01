@@ -400,7 +400,7 @@
 
   .field { display: flex; flex-direction: column; gap: 6px; }
   .field > label { font-size: 13px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
-  .field input[type="text"], .field input[type="number"], .field textarea, .field select {
+  .field input[type="text"], .field input[type="number"], .field input[type="password"], .field input[type="url"], .field textarea, .field select {
     width: 100%; border: 0.5px solid var(--separator); background: var(--bg);
     color: var(--text); border-radius: 10px; padding: 10px 12px;
     font-family: inherit; font-size: 15px; outline: none;
@@ -647,7 +647,7 @@
     font-size: 14px; font-weight: 500; opacity: 0; pointer-events: none;
     transition: opacity 0.25s, transform 0.3s var(--ease); z-index: 90;
   }
-  .toast.show { opacity: 0.96; transform: translateX(-50%) translateY(0); }
+  .toast.show { opacity: 0.96; transform: translateX(-50%) translateY(0); pointer-events: auto; }
 
   @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
   @keyframes pop { from { opacity: 0; transform: translateY(10px) scale(0.97); } }
@@ -720,6 +720,18 @@
     .hamburger { display: grid; }
     .model-pill { max-width: 46vw; }
   }
+</style>
+<style>
+.web-sources { margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.web-sources summary { cursor: pointer; padding: 4px 0; }
+.web-sources p { margin: 6px 0; overflow-wrap: anywhere; }
+.web-sources a { display: block; padding: 5px 0; overflow-wrap: anywhere; color: var(--accent); }
+.web-settings select { width: 100%; padding: 9px; margin: 4px 0 8px; background: var(--bg); color: var(--text); border: 1px solid var(--separator); border-radius: 8px; }
+.web-settings input { margin: 5px 0; }
+.web-settings input[type=checkbox] { width: auto; }
+.web-settings .row { gap: 8px; flex-wrap: wrap; }
+.web-settings .sub { font-size: 12px; line-height: 1.6; color: var(--text-secondary); margin: 4px 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 </style>
 </head>
 <body>
@@ -838,6 +850,25 @@
     <div class="field">
       <label>Ollama 주소</label>
       <input type="text" id="setUrl" placeholder="http://localhost:11434" />
+    </div>
+    <div class="field">
+      <label for="setContext">컨텍스트 상한 (모델 한도 내)</label>
+      <input type="number" id="setContext" min="2048" max="32768" step="1024" />
+    </div>
+    <div class="field web-settings">
+      <label for="webMode">AI 웹 검색</label>
+      <select id="webMode"><option value="off">꺼짐 (기본값)</option><option value="ask">검색 전 확인</option><option value="auto">자동 검색</option></select>
+      <label for="webProvider">검색 제공자</label>
+      <select id="webProvider"><option value="brave">Brave Search API</option><option value="searxng">SearXNG JSON API</option></select>
+      <label for="webKey">Brave API 키 (Windows 계정 암호화 저장)</label>
+      <input type="password" id="webKey" autocomplete="off" spellcheck="false" placeholder="Brave API 키" />
+      <label><input type="checkbox" id="webClearKey" /> 저장한 키 삭제</label>
+      <label for="webServer">SearXNG 서버 주소</label>
+      <input type="url" id="webServer" placeholder="https://search.example.org" />
+      <label><input type="checkbox" id="webPrivate" /> 직접 지정한 내부 IP의 SearXNG 허용</label>
+      <p class="sub">검색어와 IP 주소가 선택한 서비스에 전송됩니다. 전체 대화·첨부는 검색 API로 전송하지 않습니다. 자동 모드도 프로젝트 비밀정보 전송을 허용하지 않으며 LOCODE는 검색어를 추가 확인합니다. 활성화 시 별도 승인 창이 표시됩니다.</p>
+      <div class="row"><button class="btn secondary" id="saveWeb" type="button">검색 설정 저장</button><button class="btn secondary" id="testWeb" type="button">저장한 설정으로 연결 확인</button></div>
+      <p class="sub" id="webStatus" role="status" aria-live="polite">데스크톱 앱에서 사용할 수 있습니다. 연결 확인은 공개 테스트 검색어를 전송합니다.</p>
     </div>
 
     <div class="field">

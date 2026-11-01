@@ -1,6 +1,49 @@
 {
-  "rust-analyzer.linkedProjects": ["src-tauri/Cargo.toml"],
-  "terminal.integrated.env.windows": {
-    "PATH": "${env:USERPROFILE}\\.cargo\\bin;${env:PATH}"
+  "rust-analyzer.linkedProjects": [
+    "src-tauri/Cargo.toml"
+  ],
+  "terminal.integrated.profiles.windows": {
+    "Namu 개발 PowerShell": {
+      "path": "${env:SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-NoExit",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev-env.ps1"
+      ],
+      "icon": "terminal-powershell"
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "Namu 개발 PowerShell",
+  "terminal.integrated.cwd": "${workspaceFolder}",
+  "files.exclude": {
+    "**/src-tauri/target": true,
+    "**/src-tauri/gen": true
+  },
+  "search.exclude": {
+    "**/.tools/**": true,
+    "**/src-tauri/target/**": true,
+    "**/src-tauri/gen/**": true,
+    "**/src-tauri/ollama-bundle/**": true,
+    "**/installer/**": true,
+    "**/test-results/**": true,
+    "**/playwright-report/**": true
+  },
+  "files.watcherExclude": {
+    "**/.tools/**": true,
+    "**/src-tauri/target/**": true,
+    "**/src-tauri/ollama-bundle/**": true,
+    "**/installer/**": true
+  },
+  "rust-analyzer.server.extraEnv": {
+    "PATH": "${workspaceFolder}\\.tools\\cargo\\bin;C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\SDK\\ScopeCppSDK\\vc15\\VC\\bin;C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\SDK\\ScopeCppSDK\\vc15\\SDK\\bin;C:\\Program Files\\nodejs;${env:Path}",
+    "LIB": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\SDK\\ScopeCppSDK\\vc15\\VC\\lib;C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\SDK\\ScopeCppSDK\\vc15\\SDK\\lib",
+    "CARGO_HOME": "${workspaceFolder}\\.tools\\cargo",
+    "RUSTUP_HOME": "${workspaceFolder}\\.tools\\rustup",
+    "CARGO_TARGET_DIR": "${workspaceFolder}\\src-tauri\\target",
+    "INCLUDE": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\SDK\\ScopeCppSDK\\vc15\\VC\\include;C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\SDK\\ScopeCppSDK\\vc15\\SDK\\include\\ucrt;C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\SDK\\ScopeCppSDK\\vc15\\SDK\\include\\shared;C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\SDK\\ScopeCppSDK\\vc15\\SDK\\include\\um"
   }
 }

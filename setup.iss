@@ -4,13 +4,17 @@
 
 #define MyAppName "Namu"
 #define MyAppNameKo "나무"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "tharu8813"
 #define MyAppURL "https://github.com/tharu8813/namu"
 #define MyAppExeName "Namu.exe"
 #define MyAppGUID "{{0E1F359D-09D0-4F3C-BE2E-032F1D4E56D1}"
 ; scripts\build-installer.ps1 이 여기에 exe + ollama 런타임을 스테이징한다.
-#define PayloadDir "installer\payload"
+#ifndef PayloadDir
+  #define PayloadDir "installer\payload"
+#endif
 
 [Setup]
 AppId={#MyAppGUID}
@@ -38,12 +42,12 @@ WizardStyle=modern
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; 업그레이드 설치 시 실행 중인 앱을 닫는다 (앱 자체도 단일 인스턴스라 중복 실행은 기존 창을 띄움).
-CloseApplications=force
+CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; Windows 10 1809+ (WebView2 런타임 기본 내장 시점)
+; Windows 10 1809+. WebView2 Evergreen Runtime은 별도로 필요할 수 있다.
 MinVersion=10.0.17763
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}

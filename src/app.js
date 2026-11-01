@@ -1,7 +1,8 @@
-import { pullPercent, shouldCompress, humanBytes, humanTime, pullRate, ollamaError, renderMarkdown, ATT_LIMITS, checkAttachments, isInstalledModel, modelRefKey, estimateTokens } from "./lib.js";
-import { idbGetAll, idbGet, idbPut, idbDelete, idbBulkPut, migrateFromLocalStorage, storageAvailable } from "./store.js";
+import { pullPercent, shouldCompress, humanBytes, humanTime, pullRate, ollamaError, renderMarkdown, ATT_LIMITS, checkAttachments, isInstalledModel, modelRefKey, estimateTokens, estimateRequestTokens, safeWebUrl } from "./lib.js";
+import { idbGetAll, idbGet, idbSaveState, migrateFromLocalStorage, storageAvailable } from "./store.js";
 import * as locode from "./locode.js";
 import { ollamaFetch, ollamaStream, isTauri, invoke as tauriInvokeRaw } from "./net.js";
+import { webConfiguration, refreshWebSettings, saveWebSettings, researchChat, citedMarkdown, appendResearchUI } from "./research.js";
 
 const VISION_RE = /llava|vision|moondream|bakllava|minicpm-v|gemma3|qwen2\.?5?-?vl|internvl|pixtral/i;
 const isVisionModel = (n) => VISION_RE.test(n || "");
@@ -12,6 +13,7 @@ const DEFAULTS = {
   theme: "auto",
   systemPrompt: "",
   temperature: 0.7,
+  contextLimit: 8192,
   compress: { enabled: false, threshold: 20, keepRecent: 6 },
 };
 const KEEP_RECENT = 6;
@@ -36,13 +38,14 @@ let useIDB = true;    // IndexedDB 사용 가능 여부
 // localStorage 폴백 (IndexedDB 불가 환경)
 const ls = {
   load(k, fb) { try { return JSON.parse(localStorage.getItem(k)) ?? fb; } catch { return fb; } },
-  save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  save(k, v) { localStorage.setItem(k, JSON.stringify(v)); },
 };
 
 async function initStore() {
   useIDB = await storageAvailable();
   if (useIDB) {
-    await migrateFromLocalStorage();
+    try { await migrateFromLocalStorage(); }
+    catch { toast("이전 데이터 이관 실패 — 원본을 보존했습니다. 저장소 설정을 확인하세요"); }
     const list = await idbGetAll("convos");
     convos = Array.isArray(list) ? list : [];
     settings = { ...DEFAULTS, ...((await idbGet("kv", "settings")) || {}) };
@@ -55,6 +58,13 @@ async function initStore() {
   // 손상되었거나 오래된 저장 데이터가 앱 전체를 멈추게 하지 않도록 최소 형태로 복구한다.
   settings = { ...DEFAULTS, ...(settings && typeof settings === "object" && !Array.isArray(settings) ? settings : {}) };
   settings.compress = { ...DEFAULTS.compress, ...(settings.compress && typeof settings.compress === "object" ? settings.compress : {}) };
+  settings.ollamaUrl = typeof settings.ollamaUrl === "string" ? settings.ollamaUrl : DEFAULTS.ollamaUrl;
+  settings.systemPrompt = typeof settings.systemPrompt === "string" ? settings.systemPrompt : "";
+  settings.theme = ["auto", "dark", "light"].includes(settings.theme) ? settings.theme : "auto";
+  settings.temperature = Math.max(0, Math.min(2, Number(settings.temperature) || 0));
+  settings.contextLimit = Math.max(2048, Math.min(32768, Number(settings.contextLimit) || 8192));
+  settings.compress.threshold = Math.max(6, Math.min(60, Number(settings.compress.threshold) || 20));
+  settings.compress.keepRecent = Math.max(2, Math.min(12, Number(settings.compress.keepRecent) || 6));
   convos = Array.isArray(convos) ? convos : [];
   convos = convos.filter((c) => c && typeof c === "object").map((c) => {
     if (!c.id) c.id = uid();
@@ -87,24 +97,26 @@ function saveAll() {
   clearTimeout(_saveTimer);
   _saveTimer = setTimeout(persist, 120);
 }
-async function persist() {
+let persistQueue = Promise.resolve();
+function persist() {
+  const snapshot = structuredClone({ settings, activeId, convos, deleted: [..._deleted].filter(id => !convos.some(c => c.id === id)) });
+  const result = persistQueue.then(() => persistSnapshot(snapshot));
+  persistQueue = result.catch(() => {});
+  return result;
+}
+async function persistSnapshot(snapshot) {
   if (useIDB) {
     try {
-      await idbPut("kv", settings, "settings");
-      await idbPut("kv", activeId, "activeId");
       const present = new Set();
       const changed = [];
-      for (const c of convos) {
+      for (const c of snapshot.convos) {
         present.add(c.id);
         const snap = JSON.stringify(c);
         if (_savedConvos.get(c.id) !== snap) changed.push([c, snap]);
       }
-      if (changed.length) {
-        await idbBulkPut("convos", changed.map(([c]) => c));
-        for (const [c, snap] of changed) _savedConvos.set(c.id, snap); // 쓰기 성공 후에만 확정
-      }
-      for (const id of _deleted) { await idbDelete("convos", id); _savedConvos.delete(id); }
-      _deleted.clear();
+      await idbSaveState({ ...snapshot, convos: changed.map(([c]) => c) });
+      for (const [c, snap] of changed) _savedConvos.set(c.id, snap);
+      for (const id of snapshot.deleted) { _deleted.delete(id); _savedConvos.delete(id); }
       // 목록에서 사라진(되돌리기 창 만료 등) 대화의 스냅샷은 정리해 Map 이 무한정 커지지 않게 한다.
       for (const id of [..._savedConvos.keys()]) if (!present.has(id)) _savedConvos.delete(id);
     } catch (e) {
@@ -112,9 +124,11 @@ async function persist() {
       toast("저장 실패 — 디스크 공간을 확인하세요");
     }
   } else {
-    ls.save("settings", settings);
-    ls.save("activeId", activeId);
-    ls.save("convos", convos);
+    try {
+      ls.save("convos", snapshot.convos);
+      ls.save("settings", snapshot.settings);
+      ls.save("activeId", snapshot.activeId);
+    } catch { toast("저장 공간이 부족합니다. 대화를 내보내고 첨부 용량을 확인하세요"); }
   }
 }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
@@ -235,17 +249,18 @@ async function loadModelInfo(name) {
   if (!name || modelCaps.has(name)) return;
   try {
     const r = await ollamaFetch(settings.ollamaUrl, "/api/show", { method: "POST", body: { model: name } });
+    if (!r.ok) throw new Error("모델 기능 조회 HTTP " + r.status);
     const j = await r.json();
     modelCaps.set(name, Array.isArray(j.capabilities) ? j.capabilities : []);
     modelParams.set(name, j.details?.parameter_size || "");
     const ck = Object.keys(j.model_info || {}).find((k) => k.endsWith("context_length"));
     modelCtxLen.set(name, ck ? j.model_info[ck] : 0);
-  } catch { modelCaps.set(name, []); }
+  } catch { /* 일시 실패는 캐시하지 않아 다음 요청에서 재시도한다. */ }
 }
 async function modelHasVision(name) {
   if (!name) return false;
   await loadModelInfo(name);
-  return (modelCaps.get(name) || []).includes("vision") || isVisionModel(name);
+  return modelCaps.has(name) ? modelCaps.get(name).includes("vision") : isVisionModel(name);
 }
 
 
@@ -285,17 +300,24 @@ async function refreshModels() {
 // 모델이 보고한 컨텍스트 길이(상한 16384). 알 수 없으면 8192. 게이지 표시와
 // /api/chat 의 num_ctx 에 같은 값을 써서 표시와 실제 동작을 맞춘다.
 function ctxLimit(model) {
-  const n = model ? modelCtxLen.get(model) || 0 : 0;
-  return n ? Math.min(n, 16384) : 8192;
+  const reported = Number(model ? modelCtxLen.get(model) : 0);
+  const n = Number.isFinite(reported) && reported >= 512 ? reported : 0;
+  return Math.min(n || 8192, Math.max(2048, Math.min(Number(settings.contextLimit) || 8192, 32768)));
 }
 
-async function chatStream(convo, onChunk, signal) {
+async function chatStream(convo, onChunk, signal, onResearch) {
+  await loadModelInfo(convo.model);
   const body = {
     model: convo.model,
     messages: buildApiMessages(convo),
     stream: true,
     options: { temperature: settings.temperature, num_ctx: ctxLimit(convo.model) },
   };
+  if (estimateRequestTokens(body.messages) > ctxLimit(convo.model) - 1200) throw new Error("컨텍스트 한도를 넘었습니다. 새 대화를 시작하거나 첨부를 줄여주세요");
+  if (webConfiguration().config.mode !== "off" && isTauri()) {
+    return researchChat({ base: settings.ollamaUrl, model: convo.model, messages: body.messages, options: body.options,
+      signal, toolsSupported: modelCaps.get(convo.model)?.includes("tools") === true, onChunk, onResearch });
+  }
   let streamErr = null;
   await ollamaStream(settings.ollamaUrl, "/api/chat", body, (o) => {
     if (o.error) { streamErr = o.error; return; }
@@ -304,9 +326,10 @@ async function chatStream(convo, onChunk, signal) {
   if (streamErr) throw new Error(String(ollamaError(streamErr, streamErr)));
 }
 
-async function complete(model, prompt) {
+const summaryRequests = new Map();
+async function complete(model, prompt, signal) {
   const r = await ollamaFetch(settings.ollamaUrl, "/api/generate", {
-    method: "POST", body: { model, prompt, stream: false },
+    method: "POST", body: { model, prompt, stream: false }, signal,
   });
   if (!r.ok) throw new Error("요약 실패: " + r.status);
   return (await r.json()).response || "";
@@ -320,6 +343,7 @@ function buildApiMessages(convo) {
   const start = convo.summarizedUpTo || 0;
   for (const m of convo.messages.slice(start)) {
     if (m.role !== "user" && m.role !== "assistant") continue;
+    if (m.role === "assistant" && (!m.content || m.error)) continue;
     const mm = { role: m.role, content: m.content + (m.fileText ? "\n\n" + m.fileText : "") };
     if (m.images && m.images.length) mm.images = m.images;
     msgs.push(mm);
@@ -328,28 +352,36 @@ function buildApiMessages(convo) {
 }
 
 async function maybeCompress(convo) {
+  const fingerprint = JSON.stringify(convo.messages);
+  const previousSummary = convo.summary;
   const start = convo.summarizedUpTo || 0;
   const live = convo.messages.slice(start).filter((m) => m.role === "user" || m.role === "assistant");
   if (!shouldCompress(live, settings.compress)) return;
   const keep = settings.compress.keepRecent || KEEP_RECENT;
   if (live.length <= keep) return;
   const toSummarize = live.slice(0, live.length - keep);
+  const boundary = convo.messages.indexOf(toSummarize.at(-1)) + 1;
   const prompt =
     (convo.summary ? "기존 요약:\n" + convo.summary + "\n\n" : "") +
     "다음 대화를 사실·결정·이름·미해결 질문을 보존하며 간결하게 요약하라:\n\n" +
-    toSummarize.map((m) => (m.role === "user" ? "사용자" : "AI") + ": " + m.content).join("\n");
+    toSummarize.map((m) => (m.role === "user" ? "사용자" : "AI") + ": " + m.content + (m.fileText ? "\n" + m.fileText : "") + (m.images?.length ? "\n[이미지 첨부: 텍스트 요약만으로 이미지 내용을 확인할 수 없음]" : "")).join("\n");
   if (modelState(convo.model) !== "ready") return;
+  if (estimateTokens(prompt) > ctxLimit(convo.model) - 1200) return;
+  summaryRequests.get(convo.id)?.abort();
+  const controller = new AbortController(); summaryRequests.set(convo.id, controller);
   try {
-    const summary = await complete(convo.model, prompt);
+    const summary = await complete(convo.model, prompt, controller.signal);
+    if (!summary.trim() || JSON.stringify(convo.messages) !== fingerprint || convo.summary !== previousSummary || !convos.includes(convo)) return;
     convo.summary = summary.trim();
-    convo.summarizedUpTo = start + toSummarize.length;
-    convo.messages.splice(start + toSummarize.length, 0, {
+    convo.summarizedUpTo = boundary;
+    convo.messages.splice(boundary, 0, {
       role: "system", content: `⋯ 이전 ${toSummarize.length}개 메시지를 요약으로 접었습니다 ⋯`, folded: true,
     });
     convo.summarizedUpTo += 1;
     saveAll();
     renderMessages();
-  } catch (e) { console.warn("압축 실패", e); }
+  } catch (e) { if (!controller.signal.aborted) console.warn("압축 실패", e); }
+  finally { if (summaryRequests.get(convo.id) === controller) summaryRequests.delete(convo.id); }
 }
 
 /* ---------- rendering ---------- */
@@ -568,10 +600,10 @@ function updateCtxMeter() {
   const el = $("ctxMeter");
   const c = active();
   if (!c || c.mode === "locode" || !models.length) { el.hidden = true; return; }
-  let used = 0;
-  for (const m of buildApiMessages(c)) used += estimateTokens(m.content);
+  let used = estimateRequestTokens(buildApiMessages(c));
   used += estimateTokens($("input").value);
   for (const a of pending) if (a.kind === "text") used += estimateTokens(a.text);
+  used += pending.filter(a => a.kind === "image").length * 1024;
   if (used === 0) { el.hidden = true; return; }
   const limit = ctxLimit(c.model);
   const pct = Math.min(100, (used / limit) * 100);
@@ -699,11 +731,18 @@ const ONBOARDING_PICKS = [
 ];
 
 function openExternal(url) {
+  if (!safeWebUrl(url)) return;
   // Tauri: OS 기본 브라우저로 연다. 웹: 새 탭. (이전엔 Tauri 성공 시에도 window.open 이
   // 한 번 더 불려 빈 웹뷰 창이 뜰 수 있었다 — open_url 성공은 null 을 반환하므로.)
   if (isTauri()) tauriInvoke("open_url", { url });
   else window.open(url, "_blank", "noopener");
 }
+document.addEventListener("click", event => {
+  if (event.defaultPrevented) return;
+  const link = event.target.closest?.("a[href]");
+  if (!link || !safeWebUrl(link.href)) return;
+  event.preventDefault(); openExternal(link.href);
+});
 
 function renderOnboarding(el) {
   const box = document.createElement("section");
@@ -882,7 +921,7 @@ function renderMessages() {
     const tx = document.createElement("div");
     if (m.role === "assistant") {
       tx.className = "md";
-      if (m.content) { tx.innerHTML = renderMarkdown(m.content); enhanceCodeBlocks(tx); }
+      if (m.content) { tx.innerHTML = citedMarkdown(m.content, m.research); enhanceCodeBlocks(tx); }
       else if (streaming && m === c.messages[c.messages.length - 1]) tx.innerHTML = `<span class="typing"><i></i><i></i><i></i></span>`;
       b.appendChild(tx);
     } else if (m.content) {
@@ -917,6 +956,7 @@ function renderMessages() {
       b.appendChild(retry);
     }
 
+    appendResearchUI(b, m.research, streaming && m === c.messages.at(-1) ? stopStreaming : null);
     row.appendChild(b);
 
     // 액션 버튼: 스트리밍 중이 아닐 때만
@@ -1066,6 +1106,16 @@ function renderCatalog() {
 
 function renderSettings() {
   $("setUrl").value = settings.ollamaUrl;
+  $("setContext").value = settings.contextLimit || 8192;
+  const web = webConfiguration();
+  $("webMode").value = web.config.mode;
+  $("webProvider").value = web.config.provider;
+  $("webServer").value = web.config.server;
+  $("webPrivate").checked = web.config.allow_private_searx;
+  $("webKey").value = "";
+  $("webKey").placeholder = web.has_key ? "저장된 키 있음 · 변경할 때만 입력" : "Brave API 키";
+  $("saveWeb").disabled = !isTauri();
+  $("testWeb").disabled = !isTauri();
   $("setSystem").value = settings.systemPrompt;
   $("setTemp").value = settings.temperature;
   $("setTempVal").textContent = Number(settings.temperature).toFixed(1);
@@ -1240,6 +1290,7 @@ async function pullModel(name) {
 // 카탈로그에 명시된 대략 용량과 실제 여유 공간(Tauri) 을 비교해 경고
 async function maybeWarnDiskSpace(name) {
   try {
+    if (!["localhost", "127.0.0.1", "[::1]"].includes(new URL(settings.ollamaUrl).hostname)) return;
     const base = name.split(":")[0];
     const entry = (catalog || []).find((m) => m.name === base);
     const tag = name.includes(":") ? name.split(":")[1] : "";
@@ -1279,6 +1330,7 @@ function updateSendButton() {
 
 function stopStreaming() {
   if (abortCtrl) abortCtrl.abort();
+  for (const controller of summaryRequests.values()) controller.abort();
   if (locode.locodeRunning()) locode.locodeStop();
 }
 
@@ -1316,6 +1368,7 @@ function classifyChatError(raw) {
 
 // 한 번의 AI 응답 턴. c.messages 마지막이 사용자 메시지여야 한다.
 async function runAssistantTurn(c) {
+  summaryRequests.get(c.id)?.abort();
   const msg = { id: uid(), role: "assistant", content: "" };
   c.messages.push(msg);
   streaming = true;
@@ -1326,13 +1379,19 @@ async function runAssistantTurn(c) {
 
   let aborted = false;
   const signal = abortCtrl.signal;
+  let paintTimer = null;
   announce("응답 생성 중");
   try {
     await chatStream(c, (chunk) => {
+      if (signal.aborted || !convos.includes(c) || !c.messages.includes(msg)) return;
       msg.content += chunk;
-      const md = document.querySelector(`[data-mid="${msg.id}"] .md`);
-      if (md) { md.innerHTML = renderMarkdown(msg.content); scrollIfAtBottom(); updateScrollBtn(); }
-    }, signal);
+      if (!paintTimer) paintTimer = setTimeout(() => {
+        paintTimer = null;
+        if (signal.aborted) return;
+        const md = document.querySelector(`[data-mid="${msg.id}"] .md`);
+        if (md) { md.innerHTML = citedMarkdown(msg.content, msg.research); scrollIfAtBottom(); updateScrollBtn(); }
+      }, 60);
+    }, signal, (data) => { msg.research = structuredClone(data); if (active() === c && !signal.aborted) renderMessages(); });
     if (signal.aborted) aborted = true; // Rust 프록시는 취소 시 예외 없이 끝난다
   } catch (e) {
     if (e.name === "AbortError" || signal.aborted) aborted = true;
@@ -1346,6 +1405,7 @@ async function runAssistantTurn(c) {
       toast("응답 실패 — " + (hint ? hint.split(".")[0] : raw.slice(0, 60)));
     }
   } finally {
+    clearTimeout(paintTimer);
     streaming = false;
     abortCtrl = null;
     updateSendButton();
@@ -1396,6 +1456,7 @@ async function send() {
   c.messages.push(userMsg);
   c.updated = Date.now();
   if (c.title === "새 채팅") c.title = (text || built.attachments[0]?.name || "첨부").slice(0, 30);
+  saveAll();
   pending = []; renderAttachStrip();
   ta.value = ""; ta.style.height = "auto";
 
@@ -1430,7 +1491,7 @@ async function regenerateFrom(msgId) {
   if (cut === 0) return;
   c.messages = c.messages.slice(0, cut);
   // 요약 인덱스가 잘린 범위를 넘으면 되돌린다
-  if ((c.summarizedUpTo || 0) > c.messages.length) { c.summarizedUpTo = 0; c.summary = ""; }
+  c.summarizedUpTo = 0; c.summary = "";
   saveAll();
   renderMessages();
   await runAssistantTurn(c);
@@ -1448,7 +1509,7 @@ function editUserMessage(msgId) {
   // 첨부는 복원하지 않는다(파일 원본이 없을 수 있음) — 안내
   if (m.attachments?.length) toast("첨부는 다시 추가해야 합니다");
   c.messages = c.messages.slice(0, idx);
-  if ((c.summarizedUpTo || 0) > c.messages.length) { c.summarizedUpTo = 0; c.summary = ""; }
+  c.summarizedUpTo = 0; c.summary = "";
   saveAll();
   renderConvoList();
   renderMessages();
@@ -1545,11 +1606,37 @@ $("themeSeg").addEventListener("click", (e) => {
   settings.theme = b.dataset.theme; saveAll(); applyTheme(); renderSettings();
 });
 $("setUrl").addEventListener("change", () => { settings.ollamaUrl = $("setUrl").value.trim() || DEFAULTS.ollamaUrl; saveAll(); refreshModels(); });
+$("setContext").addEventListener("change", () => { settings.contextLimit = Math.max(2048, Math.min(32768, Number($("setContext").value) || 8192)); saveAll(); updateCtxMeter(); });
+$("saveWeb").onclick = async () => {
+  const button = $("saveWeb"); button.disabled = true;
+  try {
+    if ($("webMode").value === "off") stopStreaming();
+    await saveWebSettings({ mode: $("webMode").value, provider: $("webProvider").value, server: $("webServer").value.trim(), allow_private_searx: $("webPrivate").checked }, $("webKey").value.trim(), $("webClearKey").checked);
+    $("webClearKey").checked = false; renderSettings(); $("webStatus").textContent = "검색 설정을 저장했습니다";
+  } catch (e) { $("webStatus").textContent = String(e.message || e); }
+  finally { $("webKey").value = ""; button.disabled = !isTauri(); }
+};
+$("testWeb").onclick = async () => {
+  $("testWeb").disabled = true;
+  let researchId;
+  try {
+    researchId = await tauriInvokeRaw("web_begin", { projectId: null });
+    const result = await tauriInvokeRaw("web_search", { researchId, requestId: crypto.randomUUID(), query: "Ollama official documentation", maxResults: 1, freshness: null, language: "en" });
+    $("webStatus").textContent = result.provider + " 연결 성공 · " + result.results.length + "개 출처";
+  } catch (e) { $("webStatus").textContent = String(e.message || e); }
+  finally { if (researchId) await tauriInvokeRaw("web_end", { researchId }).catch(() => {}); $("testWeb").disabled = !isTauri(); }
+};
 $("setSystem").addEventListener("change", () => { settings.systemPrompt = $("setSystem").value; saveAll(); updateCtxMeter(); });
 $("setTemp").addEventListener("input", () => { settings.temperature = parseFloat($("setTemp").value); $("setTempVal").textContent = settings.temperature.toFixed(1); saveAll(); });
 $("setCompress").addEventListener("click", () => { settings.compress.enabled = !settings.compress.enabled; saveAll(); renderSettings(); });
 $("setThreshold").addEventListener("input", () => { settings.compress.threshold = parseInt($("setThreshold").value); $("setThresholdVal").textContent = settings.compress.threshold; saveAll(); });
-$("resetSettings").onclick = () => { settings = JSON.parse(JSON.stringify(DEFAULTS)); saveAll(); applyTheme(); renderSettings(); refreshModels(); toast("기본값으로 되돌림"); };
+$("resetSettings").onclick = async () => {
+  try {
+    if (isTauri()) await saveWebSettings({ ...webConfiguration().config, mode: "off" }, null);
+    settings = JSON.parse(JSON.stringify(DEFAULTS)); saveAll(); applyTheme(); renderSettings(); refreshModels(); toast("기본값으로 되돌림 · 웹 검색 꺼짐");
+  } catch (e) { toast("설정 초기화 실패: " + (e.message || e)); }
+};
+document.addEventListener("visibilitychange", () => { if (document.hidden) { clearTimeout(_saveTimer); persist(); } });
 $("openShortcuts").onclick = () => { closeSheet(); openSheet("shortcutsSheet"); };
 
 // ---------- 키보드 단축키 ----------
@@ -1619,6 +1706,7 @@ function closeFilePreview() { $("fpScrim")?.remove(); document.querySelector(".f
 /* ---------- boot ---------- */
 (async () => {
   await initStore();
+  try { await refreshWebSettings(); } catch { toast("웹 검색 설정을 읽지 못했습니다. 검색은 꺼짐으로 유지합니다"); }
   applyTheme();
   updateSendButton();
   locode.locodeInit({

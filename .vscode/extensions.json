@@ -2,6 +2,7 @@
   "recommendations": [
     "rust-lang.rust-analyzer",
     "tauri-apps.tauri-vscode",
-    "ms-vscode.cpptools"
+    "ms-vscode.cpptools",
+    "ms-playwright.playwright"
   ]
 }

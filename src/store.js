@@ -1,83 +1,88 @@
-// store.js — IndexedDB 영속 계층. 대화는 용량이 큰 base64 이미지를 담을 수 있어
-// localStorage(약 5MB) 대신 IndexedDB 에 저장한다. 설정·기타 값은 kv 스토어에.
-
+// IndexedDB schema v2. Atomic migration and conversation/settings snapshots.
 const DB_NAME = "localai";
-const DB_VER = 1;
+const DB_VER = 2;
 let _dbPromise = null;
-
 function openDB() {
   return new Promise((resolve, reject) => {
     const rq = indexedDB.open(DB_NAME, DB_VER);
     rq.onupgradeneeded = () => {
-      const db = rq.result;
-      if (!db.objectStoreNames.contains("convos")) db.createObjectStore("convos", { keyPath: "id" });
-      if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
+      const d = rq.result;
+      if (!d.objectStoreNames.contains("convos")) d.createObjectStore("convos", { keyPath: "id" });
+      if (!d.objectStoreNames.contains("kv")) d.createObjectStore("kv");
     };
-    rq.onsuccess = () => resolve(rq.result);
+    rq.onblocked = () => reject(new Error("다른 Namu 창이 저장소 업데이트를 막고 있습니다"));
     rq.onerror = () => reject(rq.error);
+    rq.onsuccess = () => {
+      const d = rq.result;
+      d.onversionchange = () => { d.close(); _dbPromise = null; };
+      resolve(d);
+    };
   });
 }
-function db() {
-  return (_dbPromise ||= openDB());
+function db() { return _dbPromise ||= openDB().catch(e => { _dbPromise = null; throw e; }); }
+async function transaction(stores, mode, fn) {
+  const d = await db();
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction(stores, mode);
+    let result;
+    tx.oncomplete = () => resolve(result && "result" in result ? result.result : result);
+    tx.onerror = () => reject(tx.error || new Error("저장 오류"));
+    tx.onabort = () => reject(tx.error || new Error("저장이 취소되었습니다"));
+    const fail = e => { tx.abort(); reject(e); };
+    try { result = fn(tx, fail); } catch (e) { fail(e); }
+  });
 }
-
-function req(store, mode, fn) {
-  return db().then(
-    (d) =>
-      new Promise((resolve, reject) => {
-        const tx = d.transaction(store, mode);
-        const result = fn(tx.objectStore(store));
-        tx.oncomplete = () => resolve(result && "result" in result ? result.result : result);
-        tx.onerror = () => reject(tx.error);
-        tx.onabort = () => reject(tx.error || new Error("tx aborted"));
-      })
-  );
+let writeQueue = Promise.resolve();
+function write(fn) {
+  const result = writeQueue.then(fn);
+  writeQueue = result.catch(() => {});
+  return result;
 }
-
-export const idbGetAll = (store) => req(store, "readonly", (s) => s.getAll());
-export const idbGet = (store, key) => req(store, "readonly", (s) => s.get(key));
-export const idbPut = (store, val, key) => req(store, "readwrite", (s) => (key === undefined ? s.put(val) : s.put(val, key)));
-export const idbDelete = (store, key) => req(store, "readwrite", (s) => s.delete(key));
-export const idbClear = (store) => req(store, "readwrite", (s) => s.clear());
-
+const req = (store, mode, fn) => mode === "readwrite"
+  ? write(() => transaction(store, mode, tx => fn(tx.objectStore(store))))
+  : writeQueue.then(() => transaction(store, mode, tx => fn(tx.objectStore(store))));
+export const idbGetAll = store => req(store, "readonly", s => s.getAll());
+export const idbGet = (store, key) => req(store, "readonly", s => s.get(key));
+export const idbPut = (store, val, key) => {
+  const copy = structuredClone(val);
+  return req(store, "readwrite", s => key === undefined ? s.put(copy) : s.put(copy, key));
+};
+export const idbDelete = (store, key) => req(store, "readwrite", s => s.delete(key));
+export const idbClear = store => req(store, "readwrite", s => s.clear());
 export function idbBulkPut(store, items) {
-  return db().then(
-    (d) =>
-      new Promise((resolve, reject) => {
-        const tx = d.transaction(store, "readwrite");
-        const os = tx.objectStore(store);
-        for (const it of items) os.put(it);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      })
-  );
+  const copy = structuredClone(items);
+  return write(() => transaction(store, "readwrite", tx => { for (const it of copy) tx.objectStore(store).put(it); }));
 }
-
-// 첫 실행 시 기존 localStorage 데이터를 IndexedDB 로 옮긴다. 한 번만 수행하고
-// localStorage 원본은 안전을 위해 삭제하지 않고 남겨둔다(수동 롤백 대비).
+export function idbSaveState(snapshot) {
+  const copy = structuredClone(snapshot);
+  return write(() => transaction(["convos", "kv"], "readwrite", tx => {
+    const kv = tx.objectStore("kv"), convos = tx.objectStore("convos");
+    kv.put(copy.settings, "settings"); kv.put(copy.activeId, "activeId");
+    for (const c of copy.convos) convos.put(c);
+    for (const id of copy.deleted) convos.delete(id);
+  }));
+}
 export async function migrateFromLocalStorage() {
   if (await idbGet("kv", "migrated")) return { migrated: false };
-  let moved = 0;
-  try {
-    const rawConvos = localStorage.getItem("convos");
-    if (rawConvos) {
-      const list = JSON.parse(rawConvos);
-      if (Array.isArray(list) && list.length) {
-        for (const c of list) if (c && c.id) { await idbPut("convos", c); moved++; }
-      }
-    }
-    const rawSettings = localStorage.getItem("settings");
-    if (rawSettings) await idbPut("kv", JSON.parse(rawSettings), "settings");
-    const rawActive = localStorage.getItem("activeId");
-    if (rawActive) await idbPut("kv", JSON.parse(rawActive), "activeId");
-  } catch (e) {
-    console.warn("마이그레이션 일부 실패", e);
-  }
-  await idbPut("kv", Date.now(), "migrated");
-  return { migrated: true, moved };
+  // Parsing failures leave both originals and the migration marker untouched.
+  const parse = key => { const raw = localStorage.getItem(key); return raw == null ? undefined : JSON.parse(raw); };
+  const list = parse("convos"), settings = parse("settings"), active = parse("activeId");
+  if (list !== undefined && !Array.isArray(list)) throw new Error("이전 대화 목록 형식 오류");
+  if (list?.some(c => !c || typeof c.id !== "string" || !Array.isArray(c.messages))) throw new Error("이전 대화 데이터 형식 오류");
+  if (settings !== undefined && (!settings || typeof settings !== "object" || Array.isArray(settings))) throw new Error("이전 설정 형식 오류");
+  await write(() => transaction(["convos", "kv"], "readwrite", (tx, fail) => {
+    const kv = tx.objectStore("kv"), convos = tx.objectStore("convos");
+    const putIfMissing = (store, key, value) => {
+      const get = store.get(key);
+      get.onsuccess = () => { try { if (get.result === undefined) store.keyPath ? store.put(value) : store.put(value, key); } catch (e) { fail(e); } };
+    };
+    for (const c of list || []) putIfMissing(convos, c.id, c);
+    if (settings !== undefined) putIfMissing(kv, "settings", settings);
+    if (active !== undefined) putIfMissing(kv, "activeId", active);
+    kv.put({ version: DB_VER, completed: Date.now() }, "migrated");
+  }));
+  return { migrated: true, moved: list?.length || 0 };
 }
-
-// IndexedDB 자체를 못 쓰는 환경(사생활 보호 모드 등) 감지
 export async function storageAvailable() {
-  try { await db(); return true; } catch { return false; }
+  try { await idbPut("kv", Date.now(), "storage-probe"); return true; } catch { return false; }
 }

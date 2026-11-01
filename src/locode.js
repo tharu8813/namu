@@ -1,12 +1,20 @@
 // locode.js — LOCODE 모드 (Phase 2: 읽기 + 승인제 파일 쓰기)
 // 프로젝트 열기 / 파일 트리 / 읽기·검색·수정 에이전트 루프 + diff 승인 + 변경 원장.
-import { ollamaError, renderMarkdown, lineDiff, diffStat, collapseDiff } from "./lib.js";
-import { ollamaFetch, invoke, isTauri } from "./net.js";
+import { ollamaError, renderMarkdown, lineDiff, diffStat, collapseDiff, estimateTokens } from "./lib.js";
+import { ollamaFetch, invoke as rawInvoke, isTauri, throwIfAborted } from "./net.js";
+import { ResearchTurn, WEB_TOOLS, RESEARCH_PROMPT, webConfiguration, citedMarkdown, appendResearchUI, parseToolArgs } from "./research.js";
 
 let ctx = null;
 let stopFlag = false;
 let running = false;
-const mtimeCache = new Map(); // rel path -> mtime (외부 변경 감지)
+let activeSession = null;
+let runSession = null;
+let runAbort = null;
+let researchTurn = null;
+let runStarted = 0;
+const readCache = new Map();
+const invoke = (command, args = {}) => rawInvoke(command, { ...args, projectId: args.projectId ?? (running ? runSession : activeSession) });
+const revisionCache = new Map(); // rel path -> mtime (외부 변경 감지)
 let pendingApproval = null;   // { resolve, convo, action }
 let activeRun = null;         // { id, convo, record } — Rust가 실제 프로세스를 소유한다
 let autoApproveRun = false;   // 이번 locodeSend 동안 나머지 변경 자동 승인 (삭제·재확인 명령 제외)
@@ -23,9 +31,10 @@ function resetTree() { treeCache.clear(); treeOpen.clear(); treeLoading.clear();
 async function loadTreeDir(path) {
   if (treeLoading.has(path)) return;
   treeLoading.add(path);
-  try { treeCache.set(path, await invoke("locode_list_dir", { rel: path })); }
-  catch (e) { treeCache.set(path, { error: String(e) }); }
-  finally { treeLoading.delete(path); }
+  const session = activeSession;
+  try { const entries = await invoke("locode_list_dir", { rel: path, projectId: session }); if (activeSession === session) treeCache.set(path, entries); }
+  catch (e) { if (activeSession === session) treeCache.set(path, { error: String(e) }); }
+  finally { if (activeSession === session) treeLoading.delete(path); }
   ctx.rerender();
 }
 
@@ -110,13 +119,26 @@ let activeRoot = null; // Rust 가 현재 잡고 있는 프로젝트 경로
 
 // LOCODE 대화의 프로젝트를 Rust 쪽에도 연결한다(앱 재시작 후 복구 포함).
 // 반환: "ok" | "need-reopen" | "no-project"
+let projectQueue = Promise.resolve();
+const reopening = new Map();
 async function ensureProjectOpen(convo) {
+  const path = convo.project?.path;
+  if (!path) return "no-project";
+  if (reopening.has(path)) return reopening.get(path);
+  const task = projectQueue.then(() => reconnectProject(convo));
+  projectQueue = task.catch(() => {});
+  reopening.set(path, task);
+  try { return await task; } finally { reopening.delete(path); }
+}
+async function reconnectProject(convo) {
   if (!convo.project) return "no-project";
   if (activeRoot === convo.project.path) return "ok";
+  if (running) return "need-reopen";
   try {
     const info = await invoke("locode_reopen", { path: convo.project.path });
     convo.project = { path: info.path, name: info.name, isGit: info.is_git };
     activeRoot = info.path;
+    activeSession = info.session_id; revisionCache.clear(); readCache.clear();
     loadGitStatus(convo);
     return "ok";
   } catch {
@@ -126,12 +148,14 @@ async function ensureProjectOpen(convo) {
 
 // ---------- 프로젝트 ----------
 export async function locodeOpenProject(convo) {
+  if (running) { ctx.toast("작업을 중지한 뒤 프로젝트를 바꾸세요"); return false; }
   try {
     const info = await invoke("locode_open_project");
     if (!info) return false; // 취소
     convo.project = { path: info.path, name: info.name, isGit: info.is_git };
     convo.locodeSteps = [];
     activeRoot = info.path;
+    activeSession = info.session_id; revisionCache.clear(); readCache.clear();
     if (convo.title === "새 작업" || convo.title === "새 채팅") convo.title = "📁 " + info.name;
     audit(convo, { action: "open_project", params: { path: info.path }, tier: 0, decision: "auto" });
     ctx.save();
@@ -145,27 +169,34 @@ export async function locodeOpenProject(convo) {
   }
 }
 export async function locodeCloseProject(convo) {
-  try { await invoke("locode_close_project"); } catch {}
+  if (running) { ctx.toast("작업을 중지한 뒤 프로젝트를 닫으세요"); return; }
+  try { if (activeSession) await invoke("locode_close_project"); } catch (e) { ctx.toast(String(e)); return; }
   convo.project = null;
   convo.git = null;
   activeRoot = null;
+  activeSession = null; revisionCache.clear(); readCache.clear();
   resetTree();
   ctx.save();
   ctx.rerender();
 }
 async function loadGitStatus(convo) {
+  const session = activeSession, path = convo.project?.path;
   try {
-    convo.git = await invoke("locode_git_status");
+    const git = await invoke("locode_git_status", { projectId: session });
+    if (session !== activeSession || path !== convo.project?.path) return;
+    convo.git = git;
     ctx.rerender();
-  } catch { convo.git = null; }
+  } catch { if (session === activeSession && path === convo.project?.path) convo.git = null; }
 }
 
 async function loadAuditLog(convo) {
+  const session = activeSession, path = convo.project?.path;
   if (convo.auditLog?.loading) return;
   convo.auditLog = { loading: true, entries: convo.auditLog?.entries || [] };
   ctx.rerender();
   try {
-    const rows = await invoke("locode_read_audit");
+    const rows = await invoke("locode_read_audit", { projectId: session });
+    if (session !== activeSession || path !== convo.project?.path) return;
     const entries = (rows || []).map((row) => {
       try { return JSON.parse(row); } catch { return { raw: String(row) }; }
     });
@@ -178,7 +209,8 @@ async function loadAuditLog(convo) {
 
 // ---------- 감사 로그 ----------
 function audit(convo, entry) {
-  const rec = { ...entry, model: convo.model, ts: Date.now() };
+  // Do not persist source text, model-supplied commands or secrets in browser audit history.
+  const rec = { action: entry.action, tier: entry.tier, decision: entry.decision, result: entry.result, model: convo.model, ts: Date.now() };
   (convo.audit ||= []).push(rec);
   invoke("locode_audit", { entry: JSON.stringify(rec) }).catch(() => {});
 }
@@ -190,9 +222,7 @@ const TOOLS_BY_NAME = /qwen[23]|qwq|llama-?3\.[123]|llama-?4|mistral|mixtral|min
 function caps(model) { return ctx.modelCaps.get(model) || []; }
 function knownToolModel(model) { return TOOLS_BY_NAME.test(model || ""); }
 function isToolCapable(model) {
-  const cl = caps(model);
-  if (cl.includes("tools")) return true;
-  return cl.length === 0 && knownToolModel(model); // caps 미보고 시 이름으로 추정
+  return caps(model).includes("tools");
 }
 
 // LOCODE 적합도 등급
@@ -201,12 +231,12 @@ export function locodeTier(model, capList, paramSize) {
   const name = (model || "").toLowerCase();
   const gb = parseFloat(String(paramSize || "").replace(/[^\d.]/g, "")) || 0;
   const isCoder = /coder|codestral|devstral|deepseek-coder|starcoder|codellama|codegemma|granite-code/.test(name);
-  const toolsOk = cl.includes("tools") || (cl.length === 0 && TOOLS_BY_NAME.test(name));
+  const toolsOk = cl.includes("tools");
   const visionOnly = cl.includes("vision") && !cl.includes("tools");
   if (cl.includes("embedding")) return { tier: "chat", label: "임베딩 전용", locode: false };
   if (gb && gb < 3) return { tier: "chat", label: "소형 — 코드 작업 부적합", locode: false };
   if (visionOnly) return { tier: "chat", label: "비전 전용", locode: false };
-  if (isCoder) return { tier: "code", label: "코드 작업 권장", locode: true };
+  if (isCoder && cl.includes("tools")) return { tier: "code", label: "코드 작업 권장", locode: true };
   if (toolsOk && gb >= 7 && !cl.includes("vision")) return { tier: "code", label: "코드 작업 권장", locode: true };
   if (toolsOk) return { tier: "tools", label: cl.includes("vision") ? "LOCODE 가능 (코드 전용 모델 권장)" : "LOCODE 가능", locode: true };
   return { tier: "structured", label: "읽기·제안만 (도구 호출 미지원)", locode: true };
@@ -222,7 +252,7 @@ const LOCODE_TOOLS = [
   { type: "function", function: { name: "edit_file", description: "기존 파일의 일부만 교체(부분 패치, 권장). edits 는 [{old,new}] 배열 — old 는 파일에 지금 있는 정확한 텍스트(들여쓰기·공백 포함), new 는 바꿀 텍스트. old 는 파일에서 유일해야 하니 앞뒤 줄을 충분히 포함하세요. 수정 전 반드시 read_file 하세요. 사용자 승인 후에만 반영된다.", parameters: { type: "object", properties: { path: { type: "string" }, edits: { type: "array", items: { type: "object", properties: { old: { type: "string" }, new: { type: "string" } }, required: ["old", "new"] } }, summary: { type: "string", description: "이 변경이 무엇을 하는지 한 문장" } }, required: ["path", "edits", "summary"] } } },
   { type: "function", function: { name: "move_path", description: "파일/폴더 이름 변경 또는 이동. 사용자 확인 필요.", parameters: { type: "object", properties: { from: { type: "string" }, to: { type: "string" }, summary: { type: "string" } }, required: ["from", "to", "summary"] } } },
   { type: "function", function: { name: "delete_path", description: "파일 삭제(폴더는 비어있을 때만). 사용자 확인 필요.", parameters: { type: "object", properties: { path: { type: "string" }, summary: { type: "string" } }, required: ["path", "summary"] } } },
-  { type: "function", function: { name: "run_command", description: "프로젝트 루트에서 터미널 명령 실행. 반드시 왜 필요한지 why를 설명한다. 사용자 승인 후에만 실행된다.", parameters: { type: "object", properties: { command: { type: "string" }, why: { type: "string" } }, required: ["command", "why"] } } },
+  { type: "function", function: { name: "run_command", description: "명령 실행. 가능하면 program과 args 배열로 직접 실행하세요. 셸 기능이 필요한 경우에만 command 문자열을 사용하세요. 두 방식 중 하나만 지정합니다. 모든 명령은 Rust 네이티브 승인이 필요하며 OS 샌드박스가 아닙니다.", parameters: { type: "object", properties: { command: { type: "string" }, program: { type: "string" }, args: { type: "array", items: { type: "string" } }, why: { type: "string" } }, required: ["why"] } } },
   { type: "function", function: { name: "finish", description: "작업을 마치고 사용자에게 결과를 한국어로 보고.", parameters: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] } } },
 ];
 
@@ -298,7 +328,7 @@ export function windowMessages(messages, keep) {
 // 모델이 보고한 컨텍스트 길이에 맞춰 num_ctx 를 정한다(상한 16384). 알 수 없으면 8192.
 function ctxSize(model) {
   const limit = ctx.modelCtxLen?.(model) || 0;
-  return limit ? Math.min(limit, 16384) : 8192;
+  return Math.min(limit || 8192, Math.max(2048, Number(ctx.getSettings().contextLimit) || 8192));
 }
 
 async function callModel(model, messages, useTools, signal) {
@@ -306,15 +336,39 @@ async function callModel(model, messages, useTools, signal) {
     model, messages, stream: false,
     options: { temperature: 0.2, num_ctx: ctxSize(model) },
   };
-  if (useTools) body.tools = LOCODE_TOOLS;
-  else body.format = ACTION_SCHEMA;
-  const r = await ollamaFetch(ctx.getSettings().ollamaUrl, "/api/chat", { method: "POST", body });
+  if (estimateTokens(JSON.stringify(messages)) > ctxSize(model) - 1200) throw new Error("에이전트 컨텍스트 한도 초과: 요청/첨부를 줄여주세요");
+  if (useTools) body.tools = [...LOCODE_TOOLS, ...(webConfiguration().config.mode !== "off" ? WEB_TOOLS : [])];
+  else body.format = { ...ACTION_SCHEMA, properties: { ...ACTION_SCHEMA.properties, action: { type: "string", enum: ["list_dir", "read_file", "search", "propose_plan", "finish"] } } };
+  const r = await ollamaFetch(ctx.getSettings().ollamaUrl, "/api/chat", { method: "POST", body, signal });
   if (!r.ok) throw new Error(ollamaError(await r.text().catch(() => ""), "요청 실패 " + r.status));
   const j = await r.json();
-  return { content: j.message?.content || "", toolCalls: j.message?.tool_calls || [] };
+  if (!j.message || typeof j.message.content !== "string" || (j.message.tool_calls && !Array.isArray(j.message.tool_calls))) throw new Error("모델 도구 응답 형식 오류");
+  return { content: j.message.content, toolCalls: j.message.tool_calls || [], tokens: (j.prompt_eval_count || estimateTokens(JSON.stringify(messages))) + (j.eval_count || estimateTokens(j.message.content)) };
 }
 
 const WRITE_ACTIONS = new Set(["write_file", "edit_file", "move_path", "delete_path"]);
+export function serializeToolResult(result, limit = 12000) {
+  const text = JSON.stringify(result);
+  if (text.length <= limit) return text;
+  return JSON.stringify({ truncated: true, warning: "도구 결과 일부입니다. 전체 파일을 읽었다고 가정하거나 전체 덮어쓰기를 하지 마세요. 범위를 좁혀 검색하거나 부분 편집을 사용하세요.", partial_result: text.slice(0, Math.floor((limit - 400) / 6)) });
+}
+export function validateLocodeArgs(name, raw) {
+  const a = parseToolArgs(raw);
+  const spec = LOCODE_TOOLS.find(t => t.function.name === name)?.function.parameters;
+  if (!spec) throw new Error("알 수 없는 도구: " + name);
+  for (const key of spec.required || []) if (!(key in a)) throw new Error("누락된 도구 인수: " + key);
+  const allowed = new Set([...Object.keys(spec.properties), "action", "thought", "message"]);
+  for (const [key, value] of Object.entries(a)) {
+    if (!allowed.has(key)) throw new Error("알 수 없는 인수: " + key);
+    const type = spec.properties[key]?.type;
+    if (type === "string" && typeof value !== "string" || type === "array" && !Array.isArray(value)) throw new Error("도구 인수 타입 오류: " + key);
+    if (spec.properties[key]?.enum && !spec.properties[key].enum.includes(value)) throw new Error("도구 인수 값 오류: " + key);
+  }
+  if (name === "edit_file" && (!a.edits.length || a.edits.length > 100 || a.edits.some(e => !e || typeof e.old !== "string" || !e.old || typeof e.new !== "string"))) throw new Error("편집 블록 형식 오류");
+  if (name === "run_command" && (Boolean(a.command) === Boolean(a.program) || a.args && (a.command || a.args.length > 128 || a.args.some(v => typeof v !== "string")))) throw new Error("명령은 command 또는 program+args 중 하나로 지정하세요");
+  if (JSON.stringify(a).length > 600000) throw new Error("도구 인수 크기 한도");
+  return a;
+}
 
 // 모델이 edits 항목을 {old,new} 대신 {search,replace}/{from,to} 등으로 줄 수도 있어 흡수한다.
 export function normalizeEdits(raw) {
@@ -362,7 +416,7 @@ function completePlan(convo) {
   // finish 시 현재 진행 중이던 단계만 완료로 표시한다. 손대지 않은 단계를
   // 완료로 칠하면 실제로 아무것도 안 했는데 5/5 로 보이는 착시가 생긴다.
   const cur = convo.locodePlan?.steps?.find((p) => p.status === "active");
-  if (cur) cur.status = "done";
+  if (cur && !convo.locodeSteps?.some(s => s.ts >= runStarted && !s.ok)) cur.note = "AI가 종료를 요청했습니다. 실제 실행 결과를 확인하세요.";
 }
 
 // 최근 명령을 테스트·빌드·린트 결과 패널로 묶기 위한 읽기 전용 분류.
@@ -375,7 +429,14 @@ export function commandPurpose(command) {
 }
 
 async function execAction(convo, name, args) {
-  const a = typeof args === "string" ? safeParse(args) : args || {};
+  if (stopFlag || runAbort?.signal.aborted || runSession !== activeSession) return { error: "작업이 취소되거나 프로젝트가 바뀌었습니다" };
+  if (name === "web_search" || name === "web_open") {
+    if (!researchTurn) return { error: "검색 기능이 꺼져 있습니다" };
+    try { return await researchTurn.execute(name, args); } catch (e) { return { error: String(e.message || e), verified: false }; }
+  }
+  let a;
+  try { a = validateLocodeArgs(name, args); } catch (e) { return { error: e.message }; }
+  if (!isToolCapable(convo.model) && (WRITE_ACTIONS.has(name) || name === "run_command")) return { error: "도구 미지원 모델은 읽기와 제안만 가능합니다" };
   const step = { kind: name, path: a.path || a.from, ok: true, ts: Date.now() };
 
   // 파라미터 검증
@@ -389,8 +450,6 @@ async function execAction(convo, name, args) {
     return badParam(convo, step, "edit_file 에는 path 와 edits([{old,new}], old 는 파일에 있는 정확한 텍스트)가 필요합니다");
   if (name === "move_path" && (!a.from || !a.to))
     return badParam(convo, step, "move_path 에는 from 과 to 가 필요합니다");
-  if (name === "run_command" && (!a.command || typeof a.command !== "string"))
-    return badParam(convo, step, "run_command 에는 command(명령)가 필요합니다");
 
   if (name === "propose_plan") {
     // 계획은 선택 사항이다. 형식이 틀려도 오류로 막지 말고 건너뛰게 한다(무한 재시도 방지).
@@ -403,8 +462,9 @@ async function execAction(convo, name, args) {
 
   // ── 명령 실행 (Tier 3 / 외부 상태 변경은 Tier 4 재확인) ──
   if (name === "run_command") {
+    const displayCommand = a.command || a.program + " " + JSON.stringify(a.args || []);
     let policy;
-    try { policy = await invoke("locode_command_policy", { cmd: a.command }); }
+    try { policy = await invoke("locode_command_policy", { cmd: displayCommand }); }
     catch (e) { return badParam(convo, step, "명령 안전성 확인 실패: " + e); }
     if (policy.level === "blocked") {
       audit(convo, { action: name, params: { command: a.command }, tier: 4, decision: "blocked", note: policy.reason });
@@ -414,7 +474,7 @@ async function execAction(convo, name, args) {
     const tier = policy.level === "reconfirm" ? 4 : 3;
     const auto = autoApprove(convo, name, policy.level);
     const decision = auto || await requestApproval(convo, {
-      kind: name, tier, command: a.command, why: a.why || "명령 실행", policy: policy.reason,
+      kind: name, tier, command: displayCommand, why: a.why || "명령 실행", policy: policy.reason,
       cwd: convo.project?.path || "", reconfirm: policy.level === "reconfirm",
     });
     if (decision.verdict === "reject") {
@@ -422,7 +482,7 @@ async function execAction(convo, name, args) {
       step.ok = false; step.label = "🚫 명령 실행 거부됨"; convo.locodeSteps.push(step);
       return { rejected: true, note: "사용자가 거부했습니다" };
     }
-    return runCommand(convo, a.command, a.why || "명령 실행", policy, step, !!decision.confirmed);
+    return runCommand(convo, displayCommand, a.why || "명령 실행", policy, step, a);
   }
 
   // ── 읽기 계열 (Tier 0, 자동) ──
@@ -436,11 +496,13 @@ async function execAction(convo, name, args) {
         return { entries };
       }
       if (name === "read_file") {
+        if (readCache.has(a.path)) return { ...readCache.get(a.path), cached: true };
         const f = await invoke("locode_read_file", { rel: a.path });
-        mtimeCache.set(a.path, f.mtime);
+        revisionCache.set(a.path, f.revision);
         step.label = `📄 ${a.path} 읽음${f.masked ? ` (비밀 ${f.masked}건 마스킹)` : ""}${f.truncated ? " (일부만)" : ""}`;
         convo.locodeSteps.push(step);
-        return { path: a.path, content: f.content, truncated: f.truncated };
+        const result = { path: a.path, content: f.content, truncated: f.truncated };
+        readCache.set(a.path, result); return result;
       }
       if (name === "search") {
         const hits = await invoke("locode_search", { query: a.query, kind: a.kind || "text" });
@@ -471,7 +533,12 @@ async function execAction(convo, name, args) {
     try {
       const f = await invoke("locode_read_file", { rel: a.path });
       before = f.content;
-      mtimeCache.set(a.path, f.mtime);
+      const previous = revisionCache.get(a.path);
+      if (previous && previous !== f.revision) {
+        readCache.delete(a.path); revisionCache.delete(a.path);
+        return badParam(convo, step, "파일이 외부에서 변경되었습니다. read_file로 현재 내용을 다시 확인한 뒤 새 편집을 제안하세요.");
+      }
+      revisionCache.set(a.path, f.revision);
     } catch {
       before = null; // 새 파일
     }
@@ -504,29 +571,28 @@ async function execAction(convo, name, args) {
   const content = decision.content ?? a.content;
   try {
     if (name === "write_file") {
-      const r = await invoke("locode_write_file", { rel: a.path, content, expectedMtime: mtimeCache.get(a.path) ?? null });
-      mtimeCache.set(a.path, r.mtime);
-      recordChange(convo, { path: a.path, type: r.created ? "create" : "modify", before: r.before ?? null, after: content });
+      const r = await invoke("locode_write_file", { rel: a.path, content, expectedRevision: revisionCache.get(a.path) ?? null });
+      revisionCache.set(a.path, r.revision);
+      recordChange(convo, { path: a.path, type: r.created ? "create" : "modify", backendId: r.change_id, sessionId: runSession, projectPath: convo.project.path, before: r.preview_before, after: r.preview_after });
       step.label = `✅ ${a.path} ${r.created ? "생성" : "수정"}`;
     } else if (name === "edit_file") {
-      const r = await invoke("locode_edit_file", { rel: a.path, edits, expectedMtime: mtimeCache.get(a.path) ?? null });
-      mtimeCache.set(a.path, r.mtime);
+      const r = await invoke("locode_edit_file", { rel: a.path, edits, expectedRevision: revisionCache.get(a.path) ?? null });
+      revisionCache.set(a.path, r.revision);
       // 원장 diff 용 after 는 원본(r.before)에 같은 순서로 치환해 재현한다(Rust 와 동일: 첫 일치만).
-      let after = r.before ?? "";
-      for (const e of edits) after = after.replace(e.old, e.new);
-      recordChange(convo, { path: a.path, type: "modify", before: r.before ?? null, after });
+      recordChange(convo, { path: a.path, type: "modify", backendId: r.change_id, sessionId: runSession, projectPath: convo.project.path, before: r.preview_before, after: r.preview_after });
       step.label = `✅ ${a.path} 수정 (${edits.length}곳)`;
     } else if (name === "move_path") {
-      await invoke("locode_move", { from: a.from, to: a.to });
-      recordChange(convo, { path: `${a.from} → ${a.to}`, type: "rename", from: a.from, to: a.to });
+      const r = await invoke("locode_move", { from: a.from, to: a.to });
+      recordChange(convo, { path: `${a.from} → ${a.to}`, type: "rename", from: a.from, to: a.to, backendId: r.change_id, sessionId: runSession, projectPath: convo.project.path });
       step.label = `✅ ${a.from} → ${a.to}`;
     } else if (name === "delete_path") {
       const removed = await invoke("locode_delete", { rel: a.path });
-      recordChange(convo, { path: a.path, type: "delete", before: removed ?? null, after: null });
+      recordChange(convo, { path: a.path, type: "delete", backendId: removed.change_id, sessionId: runSession, projectPath: convo.project.path, before: removed.preview_before, after: null });
       step.label = `✅ ${a.path} 삭제`;
     }
     audit(convo, { action: name, params: { path: a.path || a.from, to: a.to }, tier, decision: "approved" });
     convo.locodeSteps.push(step);
+    readCache.clear();
     advancePlan(convo, true, step.label);
     loadGitStatus(convo);
     return { applied: true, path: a.path || `${a.from}→${a.to}` };
@@ -546,7 +612,7 @@ function badParam(convo, step, msg) {
   return { error: msg };
 }
 
-async function runCommand(convo, command, why, policy, step, confirmed) {
+async function runCommand(convo, command, why, policy, step, spec) {
   const id = "run_" + ctx.uid();
   const record = { id, command, why, output: [], started: Date.now(), status: "running", policy: policy.level };
   (convo.commandRuns ||= []).push(record);
@@ -562,7 +628,7 @@ async function runCommand(convo, command, why, policy, step, confirmed) {
     const channel = new Channel();
     channel.onmessage = (line) => { record.output.push(String(line)); repaint(); };
     const result = await invoke("locode_run", {
-      cmd: command, timeout: 120, streamId: id, confirmed: policy.level !== "reconfirm" || confirmed, onLine: channel,
+      cmd: spec.command ?? null, timeout: 120, streamId: id, program: spec.program ?? null, args: spec.args ?? null, onLine: channel,
     });
     record.finished = Date.now();
     record.exitCode = result.exit_code;
@@ -616,15 +682,10 @@ export async function revertChange(convo, changeId) {
   const ch = (convo.changes || []).find((c) => c.id === changeId);
   if (!ch || ch.reverted) return;
   try {
-    if (ch.type === "create") {
-      await invoke("locode_delete", { rel: ch.path });
-    } else if (ch.type === "delete") {
-      await invoke("locode_write_file", { rel: ch.path, content: ch.before ?? "", expectedMtime: null });
-    } else if (ch.type === "modify") {
-      await invoke("locode_write_file", { rel: ch.path, content: ch.before ?? "", expectedMtime: null });
-    } else if (ch.type === "rename") {
-      await invoke("locode_move", { from: ch.to, to: ch.from });
-    }
+    if (running) throw new Error("작업을 중지한 뒤 되돌리세요");
+    if (!ch.backendId || ch.projectPath !== convo.project?.path) throw new Error("현재 세션의 복구 원본이 없습니다. 이전 실행의 파일을 빈 내용으로 복구하지 않습니다");
+    await invoke("locode_begin_session");
+    await invoke("locode_revert", { changeId: ch.backendId });
     ch.reverted = true;
     audit(convo, { action: "revert", params: { path: ch.path }, tier: 2, decision: "approved" });
     ctx.toast("되돌렸습니다: " + ch.path);
@@ -638,6 +699,8 @@ const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
 
 export function locodeStop() {
   stopFlag = true;
+  runAbort?.abort();
+  if (runSession) invoke("locode_cancel_session", { projectId: runSession }).catch(() => {});
   if (pendingApproval) resolveApproval("reject", undefined); // 승인 대기 중이면 거부로 종료
   if (activeRun) invoke("locode_stop_run", { streamId: activeRun.id }).catch(() => {});
 }
@@ -656,6 +719,13 @@ export async function locodeSend(convo, text) {
   convo.messages.push({ id: ctx.uid(), role: "user", content: text, ts: Date.now() });
   convo.updated = Date.now();
   running = true;
+  runSession = activeSession;
+  runAbort = new AbortController();
+  runStarted = Date.now();
+  convo.locodeSteps ||= [];
+  readCache.clear();
+  try { await invoke("locode_begin_session", { projectId: runSession }); }
+  catch (e) { running = false; runAbort = null; runSession = null; ctx.toast(String(e)); return; }
   stopFlag = false;
   autoApproveRun = false;
   ctx.rerender();
@@ -664,15 +734,22 @@ export async function locodeSend(convo, text) {
   // 첫 LOCODE 요청에도 모델의 실제 tools capability를 가져와, 지원 모델이 JSON 대체
   // 프로토콜로 잘못 내려가는 경쟁 상태를 없앤다.
   await ctx.ensureModelInfo?.(model);
+  if (!locodeTier(model, caps(model), ctx.modelParam?.(model)).locode) {
+    pushAssistant(convo, "이 모델은 LOCODE 작업에 적합하지 않습니다. 모델을 변경하세요."); running = false; runAbort = null; runSession = null; ctx.save(); ctx.rerender(); return;
+  }
   const useTools = isToolCapable(model);
+  researchTurn = useTools && webConfiguration().config.mode !== "off" ? new ResearchTurn({ signal: runAbort.signal, projectId: runSession, onUpdate: data => { convo.activeResearch = structuredClone(data); ctx.rerender(); } }) : null;
   const messages = buildMessages(convo);
+  if (researchTurn) messages[0].content += "\n" + RESEARCH_PROMPT;
   const taskMsg = messages[messages.length - 1]; // 이번 턴의 사용자 요청 — 창을 줄여도 항상 유지
   let iter = 0;
   let nudges = 0;
   let stuck = 0; // 연속 실패/거부 횟수 — 무한 루프 방지용
   const recent = []; // 최근 동작 시그니처 — 같은 동작 반복 감지
-  const MAX = 300; // 사실상 무제한. 실제 중단은 stuck·반복 감지·중지 버튼이 담당한다.
-  const STUCK_LIMIT = 8;
+  const MAX = 24;
+  const STUCK_LIMIT = 3;
+  let totalTokens = 0, totalActions = 0;
+  const deadline = setTimeout(() => locodeStop(), 180000);
   // 최근 6개 동작이 서로 다른 종류가 2가지 이하면 제자리걸음으로 보고 중단한다.
   const looping = (sig) => {
     recent.push(sig);
@@ -682,9 +759,12 @@ export async function locodeSend(convo, text) {
 
   try {
     while (iter++ < MAX && !stopFlag) {
+      if (Date.now() - runStarted > 180000 || totalTokens > 32000 || totalActions >= 24) { pushAssistant(convo, "시간·토큰·도구 호출 예산에 도달해 중단했습니다. 실행 기록을 확인하세요."); break; }
       let res;
       try {
-        res = await callModel(model, windowMessages(messages, taskMsg), useTools);
+        res = await callModel(model, windowMessages(messages, taskMsg), useTools, runAbort.signal);
+        totalTokens += res.tokens;
+        if (stopFlag || runAbort.signal.aborted || runSession !== activeSession) break;
       } catch (e) {
         pushAssistant(convo, "⚠️ 모델 호출 실패: " + (e.message || e));
         break;
@@ -693,7 +773,7 @@ export async function locodeSend(convo, text) {
       if (useTools) {
         if (!res.toolCalls.length) {
           const salvaged = salvageToolCalls(res.content);
-          if (salvaged.length) res.toolCalls = salvaged;
+          if (salvaged.length) res.toolCalls = salvaged.filter(tc => ["list_dir", "read_file", "search", "propose_plan", "finish"].includes(tc.function.name));
           else if (nudges++ < 2) {
             messages.push({ role: "user", content: "[시스템] 위 답변에는 도구 호출이 없었습니다. 다음 턴에는 설명 없이 도구 하나만 호출하세요 (list_dir/read_file/search/write_file/run_command). 작업이 끝났으면 finish 를 호출하세요." });
             continue;
@@ -701,19 +781,22 @@ export async function locodeSend(convo, text) {
         }
         let finished = false;
         for (const tc of res.toolCalls) {
+          if (stopFlag || ++totalActions > 24) { finished = true; break; }
           const fname = tc.function?.name;
           const fargs = tc.function?.arguments;
           if (fname === "finish") {
             completePlan(convo);
-            pushAssistant(convo, (typeof fargs === "string" ? safeParse(fargs) : fargs)?.summary || "분석 완료");
+            let finalArgs;
+            try { finalArgs = validateLocodeArgs("finish", fargs); } catch (e) { pushAssistant(convo, "⚠️ 종료 도구 인수 오류: " + e.message); finished = true; break; }
+            pushAssistant(convo, finalArgs.summary + verificationNote(convo));
             finished = true;
             break;
           }
-          const loop = looping(fname + ":" + JSON.stringify(fargs || {}).slice(0, 120));
+          const loop = looping(fname + ":" + JSON.stringify(fargs || {}));
           const out = await execAction(convo, fname, fargs);
           if (out && (out.error || out.rejected)) stuck++; else stuck = 0;
           messages.push({ role: "assistant", content: "", tool_calls: [tc] });
-          messages.push({ role: "tool", content: JSON.stringify(out).slice(0, 10000) });
+          messages.push({ role: "tool", tool_name: fname, content: serializeToolResult(out) });
           ctx.rerender();
           if (stuck >= STUCK_LIMIT || loop) { pushAssistant(convo, "AI가 같은 동작만 반복하고 있어 자동으로 중단했습니다. 더 구체적으로 요청하거나 다른 모델로 시도해 보세요."); finished = true; break; }
         }
@@ -733,12 +816,13 @@ export async function locodeSend(convo, text) {
           pushAssistant(convo, "⚠️ AI 응답을 이해하지 못했습니다. 아래 원문을 확인하세요:\n\n```\n" + res.content + "\n```");
           break;
         }
-        if (action.action === "finish") { completePlan(convo); pushAssistant(convo, action.summary || action.message || "작업 완료"); break; }
+        if (action.action === "finish") { completePlan(convo); pushAssistant(convo, (action.summary || action.message || "분석 종료") + verificationNote(convo)); break; }
+        totalActions++;
         const loop = looping(action.action + ":" + (action.path || action.from || action.query || ""));
         const out = await execAction(convo, action.action, action);
         if (out && (out.error || out.rejected)) stuck++; else stuck = 0;
         messages.push({ role: "assistant", content: res.content });
-        messages.push({ role: "user", content: "도구 결과:\n" + JSON.stringify(out).slice(0, 10000) + "\n\n다음 동작 또는 finish 를 JSON 으로 응답하세요." });
+        messages.push({ role: "user", content: "도구 결과:\n" + serializeToolResult(out, 10000) + "\n\n다음 동작 또는 finish 를 JSON 으로 응답하세요." });
         ctx.rerender();
         if (stuck >= STUCK_LIMIT || loop) { pushAssistant(convo, "AI가 같은 동작만 반복하고 있어 자동으로 중단했습니다. 더 구체적으로 요청하거나 다른 모델로 시도해 보세요."); break; }
       }
@@ -747,6 +831,11 @@ export async function locodeSend(convo, text) {
     if (iter >= MAX) pushAssistant(convo, "작업이 매우 길어져 중단했습니다. 이어서 진행하려면 다시 요청해 주세요.");
     if (stopFlag) pushAssistant(convo, "⏹ 작업이 중단되었습니다.");
   } finally {
+    clearTimeout(deadline);
+    await researchTurn?.close();
+    researchTurn = null;
+    runAbort = null;
+    runSession = null;
     running = false;
     ctx.save();
     ctx.rerender();
@@ -807,8 +896,12 @@ export function salvageToolCalls(text) {
 }
 
 function pushAssistant(convo, content) {
-  convo.messages.push({ id: ctx.uid(), role: "assistant", content, ts: Date.now() });
+  convo.messages.push({ id: ctx.uid(), role: "assistant", content, ts: Date.now(), ...(researchTurn ? { research: structuredClone(researchTurn.data) } : {}) });
   convo.updated = Date.now();
+}
+function verificationNote(convo) {
+  const runs = (convo.commandRuns || []).filter(r => r.started >= runStarted && commandPurpose(r.command) !== "other");
+  return "\n\n검증 기록: " + (runs.length ? runs.map(r => r.command + " — " + r.status).join("; ") : "이번 작업에서 테스트·빌드 성공을 확인한 기록이 없습니다.");
 }
 
 // ---------- 렌더링 ----------
@@ -839,6 +932,7 @@ export function renderLocode(el, convo) {
 
   // 앱 재시작 등으로 Rust 쪽 프로젝트 연결이 끊겼으면 복구
   if (activeRoot !== convo.project.path) {
+    if (running) { wrap.textContent = "다른 프로젝트 작업이 실행 중입니다. 작업을 중지한 뒤 전환하세요."; el.appendChild(wrap); return; }
     wrap.innerHTML = `<div class="empty"><div class="spinner" role="status"></div><p>프로젝트 다시 여는 중…</p></div>`;
     el.appendChild(wrap);
     ensureProjectOpen(convo).then((r) => {
@@ -919,15 +1013,17 @@ export function renderLocode(el, convo) {
     if (m.role === "assistant") {
       const md = document.createElement("div");
       md.className = "md";
-      md.innerHTML = renderMarkdown(m.content);
+      md.innerHTML = citedMarkdown(m.content, m.research);
       ctx.enhanceCodeBlocks?.(md);
       b.appendChild(md);
     }
     else b.textContent = m.content;
+    appendResearchUI(b, m.research);
     row.appendChild(b);
     msgs.appendChild(row);
   }
   if (running && !pendingApproval) {
+    appendResearchUI(msgs, convo.activeResearch, locodeStop);
     const r = document.createElement("div");
     r.className = "msg-row assistant";
     r.innerHTML = `<div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div>`;
@@ -952,9 +1048,9 @@ export function renderLocode(el, convo) {
 
 const PERM_MODES = [
   ["ask", "항상 묻기"],
-  ["write", "읽기·쓰기·수정 허용"],
-  ["safe", "위험 여부 확인 후 허용"],
-  ["all", "전체 허용"],
+  ["write", "파일 미리보기 생략 · 최종 승인 유지"],
+  ["safe", "변경 미리보기 생략 · 최종 승인 유지"],
+  ["all", "전체 미리보기 생략 · 최종 승인 유지"],
 ];
 
 function renderPermBar(convo) {
@@ -972,12 +1068,14 @@ function renderPermBar(convo) {
   lab.textContent = "실행 권한 ";
   lab.appendChild(sel);
   box.appendChild(lab);
+  const note = document.createElement("span"); note.textContent = "모든 변경·명령의 최종 승인은 Windows 창에서 확인합니다. 명령은 OS 샌드박스가 아닙니다."; box.appendChild(note);
   return box;
 }
 
 // 권한 모드에 따라 승인을 자동 처리한다. null 이면 사용자에게 물어야 한다.
 // blocked 명령은 어떤 모드에서도 자동 승인하지 않는다.
 function autoApprove(convo, kind, policyLevel) {
+  if (kind === "delete_path" || kind === "run_command" || kind === "move_path") return null;
   const mode = convo.locodePermMode || "ask";
   if (policyLevel === "blocked") return null;
   // 사용자가 승인 카드에서 "나머지 자동 승인"을 선택한 경우 — 삭제·재확인 명령은 계속 확인
@@ -1137,6 +1235,7 @@ function renderLedger(convo) {
     if (!ch.reverted) {
       const rbtn = document.createElement("button");
       rbtn.className = "lc-ch-btn revert"; rbtn.type = "button"; rbtn.textContent = "되돌리기";
+      rbtn.disabled = running || !ch.backendId; rbtn.title = !ch.backendId ? "이전 기록은 Rust 복구 원본이 없습니다" : "앱 종료 전까지 복구 가능";
       rbtn.onclick = () => revertChange(convo, ch.id);
       row.appendChild(rbtn);
     } else {
@@ -1229,7 +1328,7 @@ function renderApprovalCard(action) {
     ${action.reconfirm ? `<label class="lc-confirm">계속하려면 <b>실행</b>을 입력하세요 <input id="apConfirm" autocomplete="off" /></label>` : ""}
     ${!isDanger && !action.reconfirm ? `<label class="lc-ap-auto"><input type="checkbox" id="apAuto" /> 이 작업의 남은 변경은 자동 승인 (삭제·설치·네트워크 제외)</label>` : ""}
     <div class="lc-ap-actions">
-      <button class="btn ${isDanger ? "danger" : ""}" id="apOk" type="button">${isDanger ? "삭제/이동 실행" : "승인"}</button>
+      <button class="btn ${isDanger ? "danger" : ""}" id="apOk" type="button">${kindLabel} 승인</button>
       <button class="btn secondary" id="apNo" type="button">거부</button>
     </div>`;
   card.querySelector(".lc-ap-target").textContent = target;

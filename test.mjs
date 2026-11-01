@@ -161,7 +161,7 @@ assert.ok(renderMarkdown("- 첫 줄이 길어서\n  다음 줄로 이어짐").in
 // locodeTier — LOCODE 모델 적합도 등급
 {
   assert.equal(locodeTier("qwen2.5-coder:7b", ["completion", "tools"], "7B").tier, "code");
-  assert.equal(locodeTier("codellama:13b", ["completion"], "13B").tier, "code"); // 이름으로 코더
+  assert.equal(locodeTier("codellama:13b", ["completion"], "13B").tier, "structured"); // 미지원 모델은 읽기·제안만
   assert.equal(locodeTier("llama3.1:8b", ["completion", "tools"], "8B").tier, "code");
   assert.equal(locodeTier("llama3.2-vision:11b", ["tools", "completion", "vision"], "10.7B").tier, "tools"); // 비전 → code 제외
   assert.equal(locodeTier("llama3.2:3b", ["completion", "tools"], "3B").tier, "tools");
@@ -288,4 +288,8 @@ assert.equal(parseLocodeAction('먼저 확인합니다. {"action":"list_dir","pa
   assert.equal(w2.length, 2 + 13);
 }
 
-console.log("ok");
+await import("./tests/security.mjs");
+await import("./tests/transport.mjs");
+await import("./tests/research.mjs");
+await import("./tests/storage.mjs");
+console.log("ok — 기존 및 보안·통신·검색·저장소 회귀 테스트 통과");

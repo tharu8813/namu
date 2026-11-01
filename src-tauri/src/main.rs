@@ -1,12 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod approval;
 mod locode;
 mod ollama;
+mod process;
+mod web;
 
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{
@@ -17,16 +20,24 @@ use tauri::{
 
 /// 앱이 직접 띄운 ollama 프로세스. 이미 실행 중인 사용자 인스턴스는 여기 저장하지 않는다
 /// (즉, 종료 시 우리가 띄운 것만 정리한다).
-struct Ollama(Mutex<Option<Child>>);
+struct Ollama(Mutex<Option<(Child, Arc<process::ProcessTree>)>>);
 
 fn ollama_up() -> bool {
-    TcpStream::connect_timeout(&"127.0.0.1:11434".parse().unwrap(), Duration::from_millis(400)).is_ok()
+    TcpStream::connect_timeout(
+        &"127.0.0.1:11434".parse().unwrap(),
+        Duration::from_millis(400),
+    )
+    .is_ok()
 }
 
 /// 실행할 ollama 경로를 찾는다: ① 동봉 런타임 (설치 방식마다 위치가 달라 여러 후보를
 /// 확인한다) → ② PATH 의 ollama.
 fn find_ollama(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let name = if cfg!(windows) { "ollama.exe" } else { "ollama" };
+    let name = if cfg!(windows) {
+        "ollama.exe"
+    } else {
+        "ollama"
+    };
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(res) = app.path().resource_dir() {
         candidates.push(res.join("ollama").join(name));
@@ -42,10 +53,11 @@ fn find_ollama(app: &tauri::AppHandle) -> Option<PathBuf> {
         return Some(hit);
     }
     // PATH 에 있으면 이름만으로 실행 가능
-    if Command::new(name).arg("--version").output().is_ok() {
-        return Some(PathBuf::from(name));
-    }
-    None
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|p| p.is_file())
+    })
 }
 
 fn spawn_ollama(app: &tauri::AppHandle) {
@@ -63,9 +75,12 @@ fn spawn_ollama(app: &tauri::AppHandle) {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    match cmd.spawn() {
-        Ok(child) => {
-            *app.state::<Ollama>().0.lock().unwrap() = Some(child);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    match process::spawn(&mut cmd) {
+        Ok(owned) => {
+            *app.state::<Ollama>().0.lock().unwrap() = Some(owned);
         }
         Err(e) => eprintln!("ollama 실행 실패: {e}"),
     }
@@ -76,16 +91,8 @@ fn spawn_ollama(app: &tauri::AppHandle) {
 /// 남아 모델을 RAM 에 계속 물고 있다 — 그래서 프로세스 트리째 종료한다.
 fn kill_ollama(app: &tauri::AppHandle) {
     let child = app.state::<Ollama>().0.lock().unwrap().take();
-    if let Some(mut child) = child {
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            let _ = Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &child.id().to_string()])
-                .creation_flags(0x0800_0000)
-                .output();
-        }
-        let _ = child.kill();
+    if let Some((mut child, tree)) = child {
+        tree.kill();
         let _ = child.wait();
     }
 }
@@ -99,18 +106,44 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
-/// 가장 여유 공간이 큰 디스크의 남은 용량(GB). 모델 다운로드 전 경고용.
+/// OLLAMA_MODELS 또는 사용자 기본 모델 경로가 있는 디스크의 남은 용량.
 #[tauri::command]
-fn disk_free_gb() -> f64 {
+fn disk_free_gb() -> Result<f64, String> {
     let disks = sysinfo::Disks::new_with_refreshed_list();
-    let max = disks.iter().map(|d| d.available_space()).max().unwrap_or(0);
-    max as f64 / 1_000_000_000.0
+    let mut target = std::env::var_os("OLLAMA_MODELS")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join(".ollama").join("models"))
+        })
+        .ok_or("모델 저장 경로를 확인할 수 없습니다")?;
+    while !target.exists() {
+        if !target.pop() {
+            return Err("모델 드라이브를 찾을 수 없습니다".into());
+        }
+    }
+    let target = std::fs::canonicalize(target).map_err(|e| e.to_string())?;
+    let target = target
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_lowercase();
+    let disk = disks
+        .iter()
+        .filter(|d| target.starts_with(&d.mount_point().to_string_lossy().to_lowercase()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .ok_or("모델 드라이브 용량을 확인할 수 없습니다")?;
+    Ok(disk.available_space() as f64 / 1_000_000_000.0)
 }
 
 /// 기본 브라우저로 URL 열기. http/https 만 허용(명령 주입 방지).
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    let parsed = url::Url::parse(&url).map_err(|_| "잘못된 URL")?;
+    if !["http", "https"].contains(&parsed.scheme())
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || url.chars().any(|c| c.is_control())
+    {
         return Err("허용되지 않은 URL".into());
     }
     #[cfg(windows)]
@@ -191,8 +224,18 @@ fn main() {
             locode::locode_stop_run,
             locode::locode_read_audit,
             locode::locode_audit,
+            locode::locode_revert,
+            locode::locode_cancel_session,
+            locode::locode_begin_session,
+            web::web_settings,
+            web::web_save_settings,
+            web::web_search,
+            web::web_open,
+            web::web_begin,
+            web::web_end,
         ])
         .setup(|app| {
+            app.manage(web::WebState::load(app.handle()));
             let handle = app.handle().clone();
             std::thread::spawn(move || spawn_ollama(&handle));
             build_tray(app.handle())?;
@@ -210,6 +253,7 @@ fn main() {
         .run(|app, event| {
             // app.exit() 이든 OS 종료든 최종적으로 ollama 를 정리한다.
             if let RunEvent::Exit = event {
+                app.state::<locode::RunRegistry>().stop_all();
                 kill_ollama(app);
             }
         });

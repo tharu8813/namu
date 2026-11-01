@@ -13,7 +13,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - run: npm ci
       - run: node test.mjs
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:ui
 
   tauri:
     # 이 앱은 Windows 전용으로 배포하므로 실제 타깃에서 검증한다.
@@ -30,3 +33,6 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test --locked
+      - name: CPU runtime packaging regression
+        shell: pwsh
+        run: ./scripts/test-packaging.ps1

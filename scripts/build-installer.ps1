@@ -1,4 +1,4 @@
-<#
+﻿<#
   Namu — 설치 프로그램 빌드
   1) 테스트  2) tauri build --no-bundle  3) payload 스테이징  4) ISCC 로 설치본 생성
 
@@ -8,15 +8,21 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+. (Join-Path $PSScriptRoot 'dev-env.ps1')
 
 $exeName   = "Namu.exe"
 $releaseDir = Join-Path $root "src-tauri\target\release"
 $bundleDir  = Join-Path $root "src-tauri\ollama-bundle"
-$payload    = Join-Path $root "installer\payload"
+$payload    = Join-Path $root ("installer\payload-" + [guid]::NewGuid().ToString("N"))
+$packageVersion = (Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json).version
+$tauriVersion = (Get-Content -LiteralPath (Join-Path $root 'src-tauri\tauri.conf.json') -Raw -Encoding UTF8 | ConvertFrom-Json).version
+if ($packageVersion -ne $tauriVersion) { throw 'package.json / tauri.conf.json 버전 불일치' }
+if (-not (Test-Path -LiteralPath (Join-Path $bundleDir 'ollama.exe'))) { throw '동봉 런타임이 없습니다. prepare-ollama-bundle.ps1을 먼저 실행하세요.' }
 
 function Find-ISCC {
   $cands = @(
+    "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+    "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
     "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
     "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
@@ -30,6 +36,13 @@ function Find-ISCC {
 Write-Host "=== 테스트 ===" -ForegroundColor Cyan
 node test.mjs
 if ($LASTEXITCODE -ne 0) { throw "테스트 실패 — 빌드 중단" }
+Push-Location (Join-Path $root 'src-tauri')
+try {
+  cargo check --locked
+  if ($LASTEXITCODE -ne 0) { throw 'Rust 컴파일 검사 실패' }
+  cargo test --locked
+  if ($LASTEXITCODE -ne 0) { throw 'Rust 테스트 실패' }
+} finally { Pop-Location }
 
 Write-Host "=== 앱 빌드 (tauri build --no-bundle) ===" -ForegroundColor Cyan
 npm run build -- --no-bundle
@@ -37,14 +50,10 @@ if ($LASTEXITCODE -ne 0) { throw "tauri build 실패" }
 
 $exe = Join-Path $releaseDir $exeName
 if (-not (Test-Path $exe)) {
-  # productName 이 아직 반영 안 된 경우 대비: release 폴더의 최신 .exe 를 찾는다
-  $exe = Get-ChildItem $releaseDir -Filter *.exe -ErrorAction SilentlyContinue |
-         Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
-  if (-not $exe) { throw "빌드된 실행 파일을 $releaseDir 에서 찾지 못했습니다." }
+  throw "빌드된 Namu.exe를 찾지 못했습니다. 다른 실행 파일을 임의로 패키징하지 않습니다."
 }
 
 Write-Host "=== payload 스테이징 ===" -ForegroundColor Cyan
-if (Test-Path $payload) { Remove-Item $payload -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $payload | Out-Null
 
 Copy-Item $exe (Join-Path $payload $exeName) -Force
@@ -58,22 +67,16 @@ Get-ChildItem $releaseDir -Filter *.dll -ErrorAction SilentlyContinue |
 if (-not (Test-Path (Join-Path $bundleDir "ollama.exe"))) {
   throw "ollama-bundle 가 준비되지 않았습니다. scripts\prepare-ollama-bundle.ps1 을 먼저 실행하세요."
 }
-$libDst = Join-Path $payload "ollama\lib\ollama"
-New-Item -ItemType Directory -Force -Path $libDst | Out-Null
-Copy-Item (Join-Path $bundleDir "ollama.exe") (Join-Path $payload "ollama\ollama.exe") -Force
-$libSrc = Join-Path $bundleDir "lib\ollama"
-if (Test-Path $libSrc) {
-  Get-ChildItem $libSrc -File |
-    Where-Object { $_.Extension -in ".dll", ".exe" } |
-    ForEach-Object { Copy-Item $_.FullName $libDst -Force }
-}
+Copy-Item -LiteralPath $bundleDir -Destination (Join-Path $payload 'ollama') -Recurse
+Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination (Join-Path $payload 'Namu-LICENSE.txt')
+& (Join-Path $PSScriptRoot 'collect-licenses.ps1') -Destination (Join-Path $payload 'licenses')
 
 $size = "{0:N1} MB" -f ((Get-ChildItem $payload -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
 Write-Host "payload: $payload  ($size)" -ForegroundColor DarkGray
 
 Write-Host "=== 설치 프로그램 생성 (ISCC) ===" -ForegroundColor Cyan
 $iscc = Find-ISCC
-& $iscc "setup.iss"
+& $iscc "/DMyAppVersion=$packageVersion" "/DPayloadDir=$payload" "setup.iss"
 if ($LASTEXITCODE -ne 0) { throw "ISCC 컴파일 실패" }
 
 $out = Get-ChildItem (Join-Path $root "installer\output") -Filter *.exe |

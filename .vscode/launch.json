@@ -2,14 +2,37 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Tauri 디버그 실행",
+      "name": "데스크톱: Rust 디버그 (Namu)",
       "type": "cppvsdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/src-tauri/target/debug/local-ai-chat.exe",
+      "program": "${workspaceFolder}/src-tauri/target/debug/Namu.exe",
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "tauri:build-debug",
       "environment": [{ "name": "RUST_BACKTRACE", "value": "1" }],
-      "console": "integratedTerminal"
+      "stopAtEntry": false,
+      "externalConsole": false
+    },
+    {
+      "name": "데스크톱: 실행 중인 Namu에 연결",
+      "type": "cppvsdbg",
+      "request": "attach",
+      "processId": "${command:pickProcess}"
+    },
+    {
+      "name": "웹: Edge에서 JavaScript 디버그",
+      "type": "msedge",
+      "request": "launch",
+      "url": "http://127.0.0.1:8000",
+      "webRoot": "${workspaceFolder}/src",
+      "preLaunchTask": "web:serve"
+    },
+    {
+      "name": "웹: Chrome에서 JavaScript 디버그",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://127.0.0.1:8000",
+      "webRoot": "${workspaceFolder}/src",
+      "preLaunchTask": "web:serve"
     },
     {
       "name": "테스트 (test.mjs) 디버그",

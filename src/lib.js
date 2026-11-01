@@ -79,6 +79,14 @@ export function isInstalledModel(name, installed) {
 
 // ---------- 마크다운 렌더링 ----------
 const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+export const escapeAttribute = (s) => esc(String(s)).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+export function safeWebUrl(value) {
+  if (typeof value !== "string" || /[\s\u0000-\u001f<>"']/.test(value)) return null;
+  try {
+    const u = new URL(value);
+    return ["https:", "http:"].includes(u.protocol) && !u.username && !u.password ? value : null;
+  } catch { return null; }
+}
 
 // ---------- 초간단 LaTeX 렌더링 ----------
 // ponytail: 완전한 수식 엔진이 아니라 치환 기반 근사. 채팅 모델이 흔히 쓰는
@@ -201,16 +209,23 @@ export function highlightCode(source, language = "") {
 
 // 이스케이프된 텍스트에 인라인 서식 적용.
 function inlineMd(s) {
-  return s
-    .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+  const fragments = [];
+  const stash = (html) => (fragments.push(html), `\x02L${fragments.length - 1}\x02`);
+  const link = (label, encoded) => {
+    const url = safeWebUrl(encoded.replace(/&amp;/g, "&"));
+    return url ? stash(`<a href="${escapeAttribute(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`) : label;
+  };
+  return s.replace(/\x02/g, "")
+    .replace(/`([^`]+)`/g, (_, c) => stash(`<code>${c}</code>`))
+    .replace(/\[([^\]]+)\]\(([^\s)]+)\)/g, (_, label, url) => link(label, url))
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)\x02]+)/g, (_, prefix, url) => prefix + link(url, url))
     .replace(/\*\*\*([^*]+)\*\*\*/g, "<strong><em>$1</em></strong>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_]+)__/g, "<strong>$1</strong>")
     .replace(/(^|[^*\w])\*([^*\s](?:[^*]*[^*\s])?)\*(?!\w)/g, "$1<em>$2</em>")
     .replace(/(^|[^_\w])_([^_\s](?:[^_]*[^_\s])?)_(?!\w)/g, "$1<em>$2</em>")
     .replace(/~~([^~]+)~~/g, "<del>$1</del>")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+    .replace(/\x02L(\d+)\x02/g, (_, n) => fragments[+n] || "");
 }
 
 const ROW = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
@@ -439,6 +454,11 @@ export function estimateTokens(text) {
   }
   const rest = String(text).length - cjk;
   return Math.ceil(cjk / 1.5 + rest / 4);
+}
+export function estimateRequestTokens(messages, tools = []) {
+  return (messages || []).reduce((sum, m) => sum + 8 + estimateTokens(m.content || "")
+    + (m.images?.length || 0) * 1024 + (m.tool_calls ? estimateTokens(JSON.stringify(m.tool_calls)) : 0), 0)
+    + estimateTokens(JSON.stringify(tools));
 }
 
 // 요약(컨텍스트 압축)을 돌릴지 여부. messages 는 summarizedUpTo 이후의 라이브 메시지들.

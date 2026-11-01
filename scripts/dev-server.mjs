@@ -39,4 +39,4 @@ createServer(async (req, res) => {
   } catch {
     res.writeHead(404).end("Not found");
   }
-}).listen(port, () => console.log(`dev server → http://localhost:${port}  (src/, no-store)`));
+}).listen(port, "127.0.0.1", () => console.log(`dev server → http://127.0.0.1:${port}  (src/, no-store)`));

@@ -1,47 +1,327 @@
 {
   "version": "2.0.0",
   "options": {
-    "env": {
-      "PATH": "${env:USERPROFILE}\\.cargo\\bin;${env:PATH}"
-    }
+    "cwd": "${workspaceFolder}"
+  },
+  "presentation": {
+    "reveal": "always",
+    "panel": "dedicated",
+    "clear": true
   },
   "tasks": [
     {
+      "label": "environment:doctor",
+      "detail": "Node, Rust, MSVC 및 로컬 개발 환경 확인",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "doctor"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "environment:configure-vscode",
+      "detail": "현재 PC의 Rust·MSVC 환경을 rust-analyzer에 연결 (완료 후 창 다시 로드)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "configure-vscode"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "rust:install-tools",
+      "detail": "프로젝트에서 사용하는 Rust에 rustfmt·clippy 설치 (인터넷 필요)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "install-rust-tools"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "dependencies:install",
+      "detail": "package-lock.json 기준으로 npm ci 실행",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "install"
+      ],
+      "problemMatcher": []
+    },
+    {
       "label": "tauri:build-debug",
-      "detail": "Rust 셸을 디버그 프로필로 컴파일 (F5 디버깅용)",
-      "type": "shell",
-      "command": "cargo build",
-      "options": { "cwd": "${workspaceFolder}/src-tauri" },
-      "problemMatcher": ["$rustc"],
-      "group": "build"
+      "detail": "Namu.exe + PDB 빌드 (Ctrl+Shift+B / F5 사전 작업)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "build-debug"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
     },
     {
       "label": "tauri:dev",
-      "detail": "npm run dev — 핫리로드로 앱 실행 (디버거 없이)",
-      "type": "shell",
-      "command": "npm run dev",
-      "options": { "cwd": "${workspaceFolder}" },
-      "problemMatcher": [],
+      "detail": "변경 감지와 함께 데스크톱 앱 실행 (종료: 터미널 Ctrl+C)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "dev"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": "build",
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    },
+    {
+      "label": "web:serve",
+      "detail": "http://127.0.0.1:8000 — 프론트엔드 미리보기 서버",
+      "type": "process",
+      "command": "node",
+      "args": [
+        "scripts/dev-server.mjs",
+        "8000"
+      ],
       "isBackground": true,
-      "group": { "kind": "build", "isDefault": true }
+      "problemMatcher": {
+        "owner": "namu-web",
+        "pattern": {
+          "regexp": "^(.+):(\\d+): (error): (.+)$",
+          "file": 1,
+          "line": 2,
+          "severity": 3,
+          "message": 4
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^dev server starting",
+          "endsPattern": "^dev server.*http://127\\.0\\.0\\.1:8000"
+        }
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
     },
     {
       "label": "tauri:build-release",
-      "detail": "배포용 exe + NSIS 설치본 빌드",
-      "type": "shell",
-      "command": "npm run build",
-      "options": { "cwd": "${workspaceFolder}" },
-      "problemMatcher": ["$rustc"],
+      "detail": "릴리스 앱 + NSIS 설치본 빌드 (Ollama 별도 필요)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "build"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
       "group": "build"
     },
     {
+      "label": "tauri:build-app",
+      "detail": "설치본 없이 릴리스 Namu.exe만 빌드",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "build-app"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": "build"
+    },
+    {
+      "label": "installer:build",
+      "detail": "테스트 → 릴리스 빌드 → Ollama 포함 Inno Setup 설치본 (Inno Setup 필요)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "installer"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": "build"
+    },
+    {
+      "label": "ollama:prepare-bundle",
+      "detail": "설치된 Ollama의 CPU 런타임 복사 (기존 번들은 덮어쓰지 않음)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "prepare-ollama"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "rust:check",
+      "detail": "cargo check --locked",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "check"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "rust:clippy",
+      "detail": "cargo clippy --locked --all-targets",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "clippy"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "rust:format",
+      "detail": "Rust 소스 전체 포맷 (cargo fmt --all)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "fmt"
+      ],
+      "problemMatcher": []
+    },
+    {
       "label": "test",
-      "detail": "node test.mjs — 순수 함수 단위 테스트",
-      "type": "shell",
-      "command": "node test.mjs",
-      "options": { "cwd": "${workspaceFolder}" },
+      "detail": "JavaScript 단위·보안·통신·검색·저장소 회귀 테스트",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "test"
+      ],
       "problemMatcher": [],
-      "group": { "kind": "test", "isDefault": true }
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "test:rust",
+      "detail": "Rust 테스트 (cargo test --locked)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "test-rust"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": "test"
+    },
+    {
+      "label": "test:ui",
+      "detail": "Playwright UI 회귀 테스트 (Windows: Chrome 필요, 서버 자동 실행)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev.ps1",
+        "test-ui"
+      ],
+      "problemMatcher": [],
+      "group": "test"
+    },
+    {
+      "label": "test:all",
+      "detail": "JavaScript → Rust → UI 테스트 순차 실행",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "test",
+        "test:rust",
+        "test:ui"
+      ],
+      "problemMatcher": [],
+      "group": "test"
     }
   ]
 }

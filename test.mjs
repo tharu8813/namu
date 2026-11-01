@@ -234,7 +234,7 @@ assert.ok(renderMarkdown("- 첫 줄이 길어서\n  다음 줄로 이어짐").in
   assert.equal(a[0].function.name, "read_file");
   assert.equal(a[0].function.arguments.path, "hello.py");
   // 코드펜스 + 평면 형태
-  const b = salvageToolCalls('설명...\n```json\n{"action":"write_file","path":"a.js","content":"x"}\n```');
+  const b = salvageToolCalls('```json\n{"action":"write_file","path":"a.js","content":"x","summary":"생성"}\n```');
   assert.equal(b[0].function.name, "write_file");
   assert.equal(b[0].function.arguments.content, "x");
   // 배열
@@ -247,9 +247,9 @@ assert.ok(renderMarkdown("- 첫 줄이 길어서\n  다음 줄로 이어짐").in
   assert.equal(salvageToolCalls("그냥 일반 답변입니다").length, 0);
 }
 
-// 구조화 출력 대체 경로는 JSON 펜스·설명 앞뒤를 허용한다.
+// 전체 JSON 펜스만 허용하고 설명문 속 JSON은 실행하지 않는다.
 assert.equal(parseLocodeAction('```json\n{"action":"search","query":"TODO","message":"검색"}\n```').action, "search");
-assert.equal(parseLocodeAction('먼저 확인합니다. {"action":"list_dir","path":"","message":"목록"}').action, "list_dir");
+assert.equal(parseLocodeAction('먼저 확인합니다. {"action":"list_dir","path":"","message":"목록"}'), null);
 
 // normalizeEdits — edit_file 의 {old,new} 블록 흡수 (모델별 키 변형 포함)
 {
@@ -292,4 +292,5 @@ await import("./tests/security.mjs");
 await import("./tests/transport.mjs");
 await import("./tests/research.mjs");
 await import("./tests/storage.mjs");
+await import("./tests/locode.mjs");
 console.log("ok — 기존 및 보안·통신·검색·저장소 회귀 테스트 통과");

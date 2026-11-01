@@ -1,5 +1,12 @@
 # 구현 및 검증 결과
 
+2026-11-02 LOCODE 도구 호출 호환성 추가 검증: `node test.mjs` 통과,
+`npm run test:ui` 7개 통과, `cargo check --locked` 및 `cargo test --locked` 21개 통과.
+실제 `qwen2.5-coder:7b` 본문 JSON 응답과 Auto 전환, 쓰기 승인 요청까지 확인했다.
+실모델 점검의 백엔드는 모의이며 실제 Java 컴파일·실행과 Windows 승인 창 검증은
+미수행이다. [상세 변경과 검증 범위](docs/locode-tool-compatibility.md)를 참고한다.
+아래는 앞선 구현의 검증 기록이다.
+
 기준일: 2026-11-02. 제공된 로컬 소스 사본에서 수행했다. Git 메타데이터가 없으므로
 커밋·PR·원격 반영은 하지 않았다. 실제 검색 서비스에 사용자 대화나 프로젝트 파일을
 전송하는 테스트는 하지 않았다.
